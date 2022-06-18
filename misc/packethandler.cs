@@ -63,7 +63,7 @@ public class PacketHandler
 {
     private string channel;
     private MyGridProgram parent;
-	private IMyProgrammableBlock block;
+    private IMyProgrammableBlock block;
     private SystemType type;
     
     private IMyUnicastListener earLocal;
@@ -76,7 +76,7 @@ public class PacketHandler
     {
         channel = channelName;
         parent = programIn;
-		block = blockIn
+        block = blockIn
         type = typeIn;
         
         earGlobal = parent.IGC.RegisterBroadcastListener(channel);
@@ -115,12 +115,12 @@ public class PacketHandler
     
     public String getPingResponse()
     {
-		Vector3D blockPos = block.getPosition();
+        Vector3D blockPos = block.getPosition();
         return String.Join("|", 
-			"response",
-			block.CustomName,
-			String.Join(",", blockPos.X, blockPos.Y, blockPos.Z)
-			Enum.GetName(typeof(SystemType), type));
+            "response",
+            block.CustomName,
+            String.Join(",", blockPos.X, blockPos.Y, blockPos.Z)
+            Enum.GetName(typeof(SystemType), type));
     }
     
     public void ping(){ sendPacket("ping"); }
