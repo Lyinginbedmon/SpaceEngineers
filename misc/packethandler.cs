@@ -13,7 +13,7 @@ private String lastSent = "";
 public Program()
 {
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
-    handler = new PacketHandler(signalChannel, this, type, pingData);
+    handler = new PacketHandler(signalChannel, Me, this, type);
     handler.ping();
 }
 
@@ -50,8 +50,6 @@ public void Main(string argument, UpdateType updateSource)
     }
 }
 
-public string[] pingData(){ return new string[]{Me.CustomName,String.Join(",",Me.GetPosition().X,Me.GetPosition().Y,Me.GetPosition().Z)}; }
-
 public void parseGlobal(string arg, long entityID){ }
 
 public void parseLocal(string arg, long entityID)
@@ -65,9 +63,8 @@ public class PacketHandler
 {
     private string channel;
     private MyGridProgram parent;
+	private IMyProgrammableBlock block;
     private SystemType type;
-    // Ping response data string[], incl. block name and world position
-    private Func<string[]> pingResponse;
     
     private IMyUnicastListener earLocal;
     private IMyBroadcastListener earGlobal;
@@ -75,12 +72,12 @@ public class PacketHandler
     private string lastSent = "";
     private string lastReceived = "";
     
-    public PacketHandler(String channelName, MyGridProgram programIn, SystemType typeIn, Func<string[]> pingOut)
+    public PacketHandler(String channelName, IMProgrammableBlock blockIn, MyGridProgram programIn, SystemType typeIn)
     {
         channel = channelName;
         parent = programIn;
+		block = blockIn
         type = typeIn;
-        pingResponse = pingOut;
         
         earGlobal = parent.IGC.RegisterBroadcastListener(channel);
         earGlobal.SetMessageCallback(channel);
@@ -118,11 +115,12 @@ public class PacketHandler
     
     public String getPingResponse()
     {
-        String response = "response";
-        foreach(var val in pingResponse())
-            response += "|" + val;
-        response += "|" + Enum.GetName(typeof(SystemType), type);
-        return response;
+		Vector3D blockPos = block.getPosition();
+        return String.Join("|", 
+			"response",
+			block.CustomName,
+			String.Join(",", blockPos.X, blockPos.Y, blockPos.Z)
+			Enum.GetName(typeof(SystemType), type));
     }
     
     public void ping(){ sendPacket("ping"); }
