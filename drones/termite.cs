@@ -1,7 +1,5 @@
 // == Termite Miner OS ==
-const string version = "1.0";
-const int GRID_SIZE = 10;
-const double STEP_DIST = 10D;
+const string version = "1.3";
 
 private IMyTextPanel screen;
 private bool hasClearedScreen = false;
@@ -9,9 +7,13 @@ private bool hasClearedScreen = false;
 private static GridStyle STYLE = GridStyle.CORNER_SPIRAL;
 private static int rotation = 0;
 private static int index=0;
+private static int gridSize = 10;
+private static double stepDist = 5D;
 
 private static bool hasHomePos = false;
 private static Vector3D homePos = new Vector3D(0,0,0);
+private static bool hasMinePos = false;
+private static Vector3D minePos = new Vector3D(0,0,0);
 private static Vector3D moveForw = new Vector3D(0, 0, 1);
 private static Vector3D moveRight = new Vector3D(-1, 0, 1);
 readonly static Matrix directionMatrix = new Matrix(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
@@ -72,8 +74,9 @@ public Program()
 
 public void Save()
 {
-    Storage = string.Join(";", rotation%4, index, state, boreDepth);
+    Storage = string.Join(";", rotation%4, index, state, gridSize, stepDist, boreDepth);
     Storage += "|" + string.Join(";", (hasHomePos ? 1 : 0), homePos.X, homePos.Y, homePos.Z);
+    Storage += "|" + string.Join(";", (hasMinePos ? 1 : 0), minePos.X, minePos.Y, minePos.Z);
     Storage += "|" + string.Join(";", moveForw.X, moveForw.Y, moveForw.Z);
     Storage += "|" + string.Join(";", moveRight.X, moveRight.Y, moveRight.Z);
 }
@@ -91,8 +94,8 @@ public void Main(string argument, UpdateType updateSource)
     
     model.tick();
     if(!hasHomePos && model.isConnected())
-        bindFromConnector(model);
-    if(!model.runDiagnostic(echoToScreens) || model.isUnderControl() || index >= (GRID_SIZE * GRID_SIZE))
+        bindHomeFromConnector(model);
+    if(!model.runDiagnostic(echoToScreens) || model.isUnderControl() || index >= (gridSize * gridSize))
         setState(new String[]{"idle"});
     
     echoToScreens("Home position:");
@@ -100,10 +103,11 @@ public void Main(string argument, UpdateType updateSource)
     echoToScreens("  "+String.Join(", ",Math.Round(home.X,2), Math.Round(home.Y,2), Math.Round(home.Z,2)));
     
     echoToScreens("Mining direction:");
-    Vector3D direct = Vector3D.Multiply(getDirection(rotation), STEP_DIST);
+    Vector3D direct = Vector3D.Multiply(getDirection(rotation), stepDist);
     echoToScreens("  "+String.Join(", ",Math.Round(direct.X,2), Math.Round(direct.Y,2), Math.Round(direct.Z,2)));
     
-    echoToScreens("Current job ("+GRID_SIZE+"x"+GRID_SIZE+", "+boreDepth+"m)");
+    double size = gridSize * stepDist;
+    echoToScreens("Current job ("+size+"x"+size+"m, "+boreDepth+"m)");
     Vector3D digSite = getMiningPosition();
     echoToScreens("  "+String.Join(", ",Math.Round(digSite.X,2), Math.Round(digSite.Y,2), Math.Round(digSite.Z,2)));
     echoToScreens("  Travel Distance "+Math.Round((home-digSite).Length(), 2));
@@ -153,7 +157,13 @@ public void parseArg(String argument)
     else if(val.StartsWith("set_index="))
         index = int.Parse(val.Split('=')[1]);
     else if(val == "set_home")
-        bindFromConnector(model);
+        bindHomeFromConnector(model);
+    else if(val == "set_mine")
+        setMinePosition(model);
+    else if(val.StartsWith("set_grid="))
+        gridSize = Math.Abs(int.Parse(val.Split('=')[1]));
+    else if(val.StartsWith("set_size="))
+        stepDist = (double)Math.Abs(int.Parse(val.Split('=')[1]));
     else if(val.StartsWith("set_depth="))
         boreDepth = Math.Abs(int.Parse(val.Split('=')[1]));
     else if(val.StartsWith("set_state="))
@@ -170,12 +180,14 @@ public void load(String memory)
     
     // Operating data
     String[] data = lines[0].Split(';');
-    if(data.Length == 4)
+    if(data.Length == 6)
     {
         rotation = int.Parse(data[0]);
         index = int.Parse(data[1]);
         setState(new String[]{data[2]});
-        boreDepth = int.Parse(data[3]);
+        gridSize = int.Parse(data[3]);
+        stepDist = double.Parse(data[4]);
+        boreDepth = int.Parse(data[5]);
     }
     if(--entries <= 0) return;
     
@@ -194,8 +206,23 @@ public void load(String memory)
     }
     if(--entries <= 0) return;
     
-    // Forward vector
+    // Mine position
     data = lines[2].Split(';');
+    if(data.Length == 4)
+    {
+        hasMinePos = int.Parse(data[0]) > 0;
+        if(hasMinePos)
+        {
+            double x = double.Parse(data[1]);
+            double y = double.Parse(data[2]);
+            double z = double.Parse(data[3]);
+            minePos = new Vector3D(x, y, z);
+        }
+    }
+    if(--entries <= 0) return;
+    
+    // Forward vector
+    data = lines[3].Split(';');
     if(data.Length == 3)
     {
         double x = double.Parse(data[0]);
@@ -206,7 +233,7 @@ public void load(String memory)
     if(--entries <= 0) return;
     
     // Right vector
-    data = lines[3].Split(';');
+    data = lines[4].Split(';');
     if(data.Length == 3)
     {
         double x = double.Parse(data[0]);
@@ -286,9 +313,19 @@ private static void setHomePosition(Vector3D vector)
     hasHomePos = true;
     homePos = vector;
 }
-public static void bindFromConnector(Drone model)
+public static void bindHomeFromConnector(Drone model)
 {
     setHomePosition(model.getWorldPosition());
+    if(!hasMinePosition())
+        setMinePosition(model);
+}
+
+public static bool hasMinePosition(){ return hasMinePos; }
+public static Vector3D getMinePosition(){ return minePos; }
+private static void setMinePosition(Drone model)
+{
+    hasMinePos = true;
+    minePos = model.getWorldPosition();
     moveForw = Vector3D.TransformNormal(Vector3.Forward, model.getRemote().WorldMatrix);
     moveForw.Normalize();
     moveRight = Vector3D.TransformNormal(Vector3.Right, model.getRemote().WorldMatrix);
@@ -332,11 +369,11 @@ public static Vector3D getMiningPosition()
             }
             break;
         default:
-            row = index&GRID_SIZE;
-            col = MathHelper.FloorToInt(index/GRID_SIZE);
+            row = index&gridSize;
+            col = MathHelper.FloorToInt(index/gridSize);
             break;
     }
-    return getHomePosition() + Vector3D.Multiply(forward, STEP_DIST * row) + Vector3D.Multiply(getDirection(rotation + 1), STEP_DIST * col);
+    return getMinePosition() + Vector3D.Multiply(forward, stepDist * row) + Vector3D.Multiply(getDirection(rotation + 1), stepDist * col);
 }
 
 public static Vector3 getLocalFacing(IMyCubeBlock block, IMyRemoteControl remote)
@@ -524,6 +561,11 @@ public class Drone
         else if(!hasHomePosition())
         {
             echo(" X No home position set");
+            result = false;
+        }
+        else if(!hasMinePosition())
+        {
+            echo(" X No mine position set");
             result = false;
         }
         
@@ -1067,7 +1109,7 @@ private class StateDig : State
             Vector3D gravity = model.getGravity();
             gravity.Normalize();
             
-            model.setTargetVelocity(Vector3D.Multiply(gravity, empty ? 0.5D : 0.025D));
+            model.setTargetVelocity(Vector3D.Multiply(gravity, empty ? 0.5D : 0.0125D));
             echo(" > Depth "+Math.Round((model.getWorldPosition()-digSite).Length(), 2)+" ("+(isMining ? Math.Round((model.getWorldPosition() - minePos).Length(),2) : 0)+")");
             echo(" > Lift Capacity : "+Math.Round(model.getTotalMass() / model.getMaxMass(),2)*100+"%");
             if(!isMining && !empty)
