@@ -1,12 +1,15 @@
 // == Termite Miner OS ==
-const string version = "1.3";
+const string version = "1.4";
 
-private IMyTextPanel screen;
+private List<IMyTextPanel> screensAll = new List<IMyTextPanel>();
+private List<IMyTextPanel> screensInfo = new List<IMyTextPanel>();
+private List<IMyTextPanel> screensState = new List<IMyTextPanel>();
 private bool hasClearedScreen = false;
 
 private static GridStyle STYLE = GridStyle.CORNER_SPIRAL;
 private static int rotation = 0;
 private static int index=0;
+private static bool incFlag = false;
 private static int gridSize = 10;
 private static double stepDist = 5D;
 
@@ -43,8 +46,10 @@ const String spinning = "-\\|/";
 
 private enum GridStyle
     {
-        SIMPLE,
-        CORNER_SPIRAL
+        SIMPLE,    // Basic rows & columns, starting from mining position
+        CORNER_SPIRAL,    // Outward spiral, starting from mining position
+        SPIRAL,    // Outward spiral, centred on mining position
+        OFFSET    // Simple, centred on mining position
     }
 
 public Program()
@@ -58,7 +63,7 @@ public Program()
     registerState("dock", new StateDock());
     registerState("deposit", new StateDeposit());
     
-    Me.CustomName = "Miner Control";
+    Me.CustomName = "TMT Drone Control";
     model = new Drone(Me, this);
     
     List<IMyTextPanel> panels = new List<IMyTextPanel>();
@@ -66,9 +71,13 @@ public Program()
     foreach(var panel in panels)
         if(panel.CubeGrid == Me.CubeGrid)
         {
-            panel.CustomName = "Miner Info Screen";
-            screen = panel;
-            break;
+            panel.CustomName = "TMT Info Screen "+screensAll.Count;
+            string data = panel.CustomData.ToLower();
+            if(data == "state")
+                screensState.Add(panel);
+            else
+                screensInfo.Add(panel);
+            screensAll.Add(panel);
         }
 }
 
@@ -86,7 +95,8 @@ public void Main(string argument, UpdateType updateSource)
     hasClearedScreen = false;
     ++ticksRunning;
     echoToScreens("Termite OS Version "+version+" "+getSpinning()+"\n");
-    echoToScreens("Borehole Index: "+index);
+    echoToScreens("Power: "+Math.Round(model.getTotalChargePercent(),2)*100+"%");
+    echoToScreens("Borehole Index: "+index+(incFlag ? "+" : ""));
     
     if(argument.Length > 0)
         parseArg(argument);
@@ -98,47 +108,45 @@ public void Main(string argument, UpdateType updateSource)
     if(!model.runDiagnostic(echoToScreens) || model.isUnderControl() || index >= (gridSize * gridSize))
         setState(new String[]{"idle"});
     
-    echoToScreens("Home position:");
+    echoToScreens("Home position:", screensInfo);
     Vector3D home = getHomePosition();
     echoToScreens("  "+String.Join(", ",Math.Round(home.X,2), Math.Round(home.Y,2), Math.Round(home.Z,2)));
     
-    echoToScreens("Mining direction:");
+    Vector3D mine = getMinePosition();
+    if((home - mine).Length() > stepDist)
+    {
+        echoToScreens("Mining position:", screensInfo);
+        echoToScreens("  "+String.Join(", ",Math.Round(mine.X,2), Math.Round(mine.Y,2), Math.Round(mine.Z,2)));
+    }
+    
+    echoToScreens("Mining direction:", screensInfo);
     Vector3D direct = Vector3D.Multiply(getDirection(rotation), stepDist);
     echoToScreens("  "+String.Join(", ",Math.Round(direct.X,2), Math.Round(direct.Y,2), Math.Round(direct.Z,2)));
     
     double size = gridSize * stepDist;
-    echoToScreens("Current job ("+size+"x"+size+"m, "+boreDepth+"m)");
+    echoToScreens("Current job ("+size+"x"+size+"m, "+boreDepth+"m)", screensInfo);
     Vector3D digSite = getMiningPosition();
-    echoToScreens("  "+String.Join(", ",Math.Round(digSite.X,2), Math.Round(digSite.Y,2), Math.Round(digSite.Z,2)));
-    echoToScreens("  Travel Distance "+Math.Round((home-digSite).Length(), 2));
-    echoToScreens("");
+    echoToScreens("  "+String.Join(", ",Math.Round(digSite.X,2), Math.Round(digSite.Y,2), Math.Round(digSite.Z,2)), screensInfo);
+    echoToScreens("  Travel Distance "+Math.Round((home-digSite).Length(), 2), screensInfo);
+    Echo("");
     
-    echoToScreens("State: "+state);
+    hasClearedScreen = false;
+    echoToStateScreens("State: "+state);
     if(ticksInvalid > 0)
-        echoToScreens(" "+getSpinning()+" Changing State "+ticksInvalid);
+        echoToStateScreens(" "+getSpinning()+" Changing State "+ticksInvalid);
     
     if(STATE_MAP.ContainsKey(state))
     {
         State currentState = STATE_MAP[state];
-        currentState.tick(index, rotation, model, echoToScreens);
+        currentState.tick(index, rotation, model, echoToStateScreens);
         if(currentState.invalid(model) && ticksInvalid++ >= 10)
         {
             setState(currentState.exit(model));
             ticksInvalid = 0;
-            if(state == "deposit")
-            {
-                int oreCount = 0;
-                foreach(var item in ores)
-                    oreCount += model.getTotalOf(item);
-                if(oreCount <= 10000)
-                    index++;
-            }
         }
     }
     else
         setState(new String[]{"idle"});
-    
-    echoToScreens("\nPower: "+Math.Round(model.getTotalChargePercent(),2)*100+"%");
     
     Save();
 }
@@ -250,6 +258,8 @@ public void reset()
     rotation = 0;
     hasHomePos = false;
     homePos = new Vector3D(0,0,0);
+    hasMinePos = false;
+    minePos = new Vector3D(0,0,0);
     Save();
 }
 
@@ -298,12 +308,21 @@ private void setState(String[] statesIn)
     Save();
 }
 
-public void echoToScreens(string text)
+public void echoToScreens(string text){ echoToScreens(text, screensAll); }
+public void echoToStateScreens(string text){ echoToScreens(text, screensState); }
+public void echoToScreens(string text, List<IMyTextPanel> screens)
 {
     Echo(text);
-    if(screen != null && screen.IsFunctional && screen.Enabled)
-        screen.WriteText((hasClearedScreen ? "\n" : "") + text, hasClearedScreen);
+    foreach(var screen in screens)
+        if(screen != null && screen.IsFunctional && screen.Enabled)
+            screen.WriteText((hasClearedScreen ? "\n" : "") + text, hasClearedScreen);
     hasClearedScreen = true;
+}
+
+public static void increment()
+{
+    index++;
+    incFlag = false;
 }
 
 public static bool hasHomePosition(){ return hasHomePos; }
@@ -368,6 +387,28 @@ public static Vector3D getMiningPosition()
                 col = tmp;
             }
             break;
+        case GridStyle.SPIRAL:
+            if(index > 0)
+            {
+                int dx = 0;
+                int dy = -1;
+                for(int i=0; i<index; i++)
+                {
+                    if(row==col || (row < 0 && row == -col) || (row > 0 && row == 1-col))
+                    {
+                        int temp = dx;
+                        dx = -dy;
+                        dy = temp;
+                    }
+                    row += dx;
+                    col += dy;
+                }
+            }
+            break;
+        case GridStyle.OFFSET:
+            row = -(gridSize / 2) + index%gridSize;
+            col = -(gridSize / 2) + MathHelper.FloorToInt(index/gridSize);
+            break;
         default:
             row = index&gridSize;
             col = MathHelper.FloorToInt(index/gridSize);
@@ -418,7 +459,7 @@ public class Drone
         foreach(var control in controls)
             if(control.CubeGrid == localGrid)
             {
-                control.CustomName = "Miner Remote";
+                control.CustomName = "TMT Drone Remote";
                 remote = control;
                 break;
             }
@@ -428,7 +469,7 @@ public class Drone
         foreach(var control in connectors)
             if(control.CubeGrid == localGrid)
             {
-                control.CustomName = "Miner Connector";
+                control.CustomName = "TMT Connector";
                 connector = control;
                 break;
             }
@@ -438,7 +479,7 @@ public class Drone
         foreach(var box in boxes)
             if(box.CubeGrid == localGrid)
             {
-                box.CustomName = "Cargo "+cargo.Count();
+                box.CustomName = "TMT Cargo "+cargo.Count();
                 cargo.Add(box);
             }
         
@@ -447,7 +488,7 @@ public class Drone
         foreach(var gyro in gyroscopes)
             if(gyro.CubeGrid == localGrid)
             {
-                gyro.CustomName = "Gyroscope "+gyros.Count();
+                gyro.CustomName = "TMT Gyroscope "+gyros.Count();
                 gyro.ShowInTerminal = false;
                 gyro.ShowInToolbarConfig = false;
                 gyros.Add(gyro);
@@ -458,7 +499,7 @@ public class Drone
         foreach(var box in drillers)
             if(box.CubeGrid == localGrid)
             {
-                box.CustomName = "Drill "+drills.Count();
+                box.CustomName = "TMT Drill "+drills.Count();
                 box.ShowInTerminal = false;
                 box.ShowInToolbarConfig = false;
                 drills.Add(box);
@@ -469,7 +510,7 @@ public class Drone
         foreach(var box in bats)
             if(box.CubeGrid == localGrid)
             {
-                box.CustomName = "Battery "+batteries.Count();
+                box.CustomName = "TMT Battery "+batteries.Count();
                 box.ShowInTerminal = false;
                 box.ShowInToolbarConfig = false;
                 batteries.Add(box);
@@ -506,13 +547,13 @@ public class Drone
                     {
                         thruster.Enabled = true;
                         thruster.ThrustOverride = 0F;
-                        thruster.CustomName = "Auxiliary Thruster";
+                        thruster.CustomName = "TMT Aux Thruster";
                         continue;
                     }
                     
                     thrusters.Add(thruster);
                     registerThruster(thruster, localFace);
-                    thruster.CustomName = "Thruster "+(Enum.GetName(typeof(Base6Directions.Direction), localFace)[0]+""+getThrusters(localFace).Count);
+                    thruster.CustomName = "TMT Thruster "+(Enum.GetName(typeof(Base6Directions.Direction), localFace)[0]+""+getThrusters(localFace).Count);
                 }
         }
     }
@@ -968,6 +1009,7 @@ private abstract class State
     public virtual String[] exit(Drone model)
     {
         resetModel(model);
+        onExit(model);
         return exitStates(model);
     }
     public virtual void onExit(Drone model){ }
@@ -1019,6 +1061,12 @@ private class StateDetach : State
 {
     public StateDetach() : base(new Controls[]{Controls.CONNECTOR, Controls.THRUSTERS}) { }
     
+    public override void enter(int index, int rotation, Drone model)
+    {
+        if(incFlag)
+            increment();
+    }
+    
     public override void tick(int index, int rotation, Drone model, Action<string> echo)
     {
         if(model.getTotalMass() > model.getMaxMass())
@@ -1035,7 +1083,7 @@ private class StateDetach : State
         {
             Vector3D gravity = model.getGravity();
             gravity.Normalize();
-            model.setTargetVelocity(Vector3D.Multiply(gravity, TOP_SPEED));
+            model.setTargetVelocity(Vector3D.Multiply(gravity, 1D));
         }
         else
             model.clearTargetVelocity();
@@ -1065,7 +1113,7 @@ private class StateDock : StateDetach
         {
             Vector3D gravity = model.getGravity();
             gravity.Normalize();
-            model.setTargetVelocity(Vector3D.Multiply(gravity, -TOP_SPEED));
+            model.setTargetVelocity(Vector3D.Multiply(gravity, -1D));
         }
         else
             model.clearTargetVelocity();
@@ -1143,6 +1191,15 @@ private class StateDig : State
     }
     
     public override bool invalid(Drone model){ return !canShipDig(model) && model.getShipVelocities().Length() < 0.1D; }
+    
+    public override void onExit(Drone model)
+    {
+        int oreCount = 0;
+        foreach(var item in ores)
+            oreCount += model.getTotalOf(item);
+        if(oreCount <= 10000)
+            incFlag = true;
+    }
     
     public override String[] exitStates(Drone model){ return new String[]{"extract", "travel_home", "dock", "idle"}; }
 }
