@@ -123,8 +123,7 @@ public void Main(string argument, UpdateType updateSource)
     Vector3D direct = Vector3D.Multiply(getDirection(rotation), stepDist);
     echoToScreens("  "+String.Join(", ",Math.Round(direct.X,2), Math.Round(direct.Y,2), Math.Round(direct.Z,2)));
     
-    double size = gridSize * stepDist;
-    echoToScreens("Current job ("+size+"x"+size+"m, "+boreDepth+"m)", screensInfo);
+    echoToScreens("Current job ("+gridSize+"x"+gridSize+"x"+stepDist+"m, "+boreDepth+"m)", screensInfo);
     Vector3D digSite = getMiningPosition();
     echoToScreens("  "+String.Join(", ",Math.Round(digSite.X,2), Math.Round(digSite.Y,2), Math.Round(digSite.Z,2)), screensInfo);
     echoToScreens("  Travel Distance "+Math.Round((home-digSite).Length(), 2), screensInfo);
@@ -439,6 +438,7 @@ public class Drone
     private List<IMyGyro> gyros = new List<IMyGyro>();
     private List<IMyShipDrill> drills = new List<IMyShipDrill>();
     private List<IMyBatteryBlock> batteries = new List<IMyBatteryBlock>();
+    private IMySensorBlock sensor;
     
     private List<IMyThrust> thrusters = new List<IMyThrust>();
     private Dictionary<Base6Directions.Direction, List<IMyThrust>> thrustMap = new Dictionary<Base6Directions.Direction, List<IMyThrust>>();
@@ -556,6 +556,26 @@ public class Drone
                     thruster.CustomName = "TMT Thruster "+(Enum.GetName(typeof(Base6Directions.Direction), localFace)[0]+""+getThrusters(localFace).Count);
                 }
         }
+        
+        List<IMySensorBlock> sensors = new List<IMySensorBlock>();
+        program.GridTerminalSystem.GetBlocksOfType<IMySensorBlock>(sensors);
+        foreach(var sense in sensors)
+            if(sense.CubeGrid == localGrid)
+            {
+                sense.CustomName = "TMT Collision Sensor";
+                sense.Enabled = true;
+                sense.DetectAsteroids = true;
+                sense.DetectFloatingObjects = false;
+                sense.DetectLargeShips = true;
+                sense.DetectStations = true;
+                sense.DetectPlayers = false;
+                sense.DetectSmallShips = false;
+                sense.DetectSubgrids = false;
+                
+                sense.ShowInToolbarConfig = false;
+                sensor = sense;
+                break;
+            }
     }
     
     public void tick()
@@ -704,13 +724,19 @@ public class Drone
             }
         }
         
+        if(!hasCollisionSensor())
+            echo(" ? No operational collision sensor");
+        
         return result;
     }
     
     public bool isUnderControl(){ return remote != null && remote.IsFunctional && remote.IsUnderControl; }
     
+    public bool hasCollisionSensor(){ return sensor != null && sensor.Enabled && sensor.IsFunctional; }
+    public bool collisionAlarm(){ return hasCollisionSensor() ? sensor.IsActive : false; }
+    
     public List<IMyCargoContainer> getCargo(){ return cargo; }
-    public float getTotalMass(){ return remote == null ? 0F : remote.CalculateShipMass().TotalMass; }
+    public float getTotalMass(){ return remote == null ? 0F : remote.CalculateShipMass().PhysicalMass; }
     public float getMaxMass()
     {
         if(remote == null) return 0F;
@@ -1143,7 +1169,7 @@ private class StateDig : State
     
     public StateDig() : base(new Controls[]{Controls.THRUSTERS, Controls.DRILLS}) { }
     
-    public bool canShipDig(Drone model){ return model.getTotalMass() < model.getMaxMass() && model.getTotalChargePercent() > 0.2F && (model.getWorldPosition()-digSite).Length() < boreDepth; }
+    public bool canShipDig(Drone model){ return model.getTotalMass() < (model.getMaxMass() * 0.9F) && model.getTotalChargePercent() > 0.2F && (model.getWorldPosition()-digSite).Length() < boreDepth; }
     
     public override void tick(int index, int rotation, Drone model, Action<string> echo)
     {
@@ -1157,9 +1183,17 @@ private class StateDig : State
             Vector3D gravity = model.getGravity();
             gravity.Normalize();
             
-            model.setTargetVelocity(Vector3D.Multiply(gravity, empty ? 0.5D : 0.0125D));
+            double speed = 0.0125D;
+            if(empty)
+                if(model.hasCollisionSensor() && !model.collisionAlarm())
+                    speed = 1D;
+                else
+                    speed = 0.5D;
+            model.setTargetVelocity(Vector3D.Multiply(gravity, speed));
             echo(" > Depth "+Math.Round((model.getWorldPosition()-digSite).Length(), 2)+" ("+(isMining ? Math.Round((model.getWorldPosition() - minePos).Length(),2) : 0)+")");
-            echo(" > Lift Capacity : "+Math.Round(model.getTotalMass() / model.getMaxMass(),2)*100+"%");
+            if(model.hasCollisionSensor())
+                echo(" > Collision Alarm: "+model.collisionAlarm());
+            echo(" > Lift Capacity: "+Math.Round(model.getTotalMass() / model.getMaxMass(),2)*100+"%");
             if(!isMining && !empty)
             {
                 isMining = true;
@@ -1229,8 +1263,9 @@ private abstract class StateGo : State
             Vector3D motion = direction;
             motion.Normalize();
             
-            double speed = Math.Max(0.05D, Math.Min(TOP_SPEED, direction.Length()));
-            model.setTargetVelocity(Vector3D.Multiply(motion, dist > 3D ? TOP_SPEED : 0.5D));
+            double speed = model.hasCollisionSensor() && !model.collisionAlarm() ? TOP_SPEED * 2D : TOP_SPEED;
+            speed = Math.Max(0.05D, Math.Min(speed, direction.Length()));
+            model.setTargetVelocity(Vector3D.Multiply(motion, dist > 3D ? speed : 0.5D));
         }
         else
             model.clearTargetVelocity();
