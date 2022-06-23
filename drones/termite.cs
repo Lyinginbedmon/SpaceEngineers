@@ -1,12 +1,12 @@
 // == Termite Miner OS ==
-const string version = "1.4";
+const string version = "1.5";
 
 private List<IMyTextPanel> screensAll = new List<IMyTextPanel>();
 private List<IMyTextPanel> screensInfo = new List<IMyTextPanel>();
 private List<IMyTextPanel> screensState = new List<IMyTextPanel>();
 private bool hasClearedScreen = false;
 
-private static GridStyle STYLE = GridStyle.CORNER_SPIRAL;
+private static GridStyle gridStyle = GridStyle.CORNER_SPIRAL;
 private static int rotation = 0;
 private static int index=0;
 private static bool incFlag = false;
@@ -51,6 +51,14 @@ private enum GridStyle
         SPIRAL,    // Outward spiral, centred on mining position
         OFFSET    // Simple, centred on mining position
     }
+private static GridStyle styleFromName(String nameIn)
+{
+    nameIn = nameIn.ToLower();
+    foreach(GridStyle style in Enum.GetValues(typeof(GridStyle)))
+        if(Enum.GetName(typeof(GridStyle), style).ToLower() == nameIn)
+            return style;
+    return GridStyle.SIMPLE;
+}
 
 public Program()
 {
@@ -83,7 +91,7 @@ public Program()
 
 public void Save()
 {
-    Storage = string.Join(";", rotation%4, index, state, gridSize, stepDist, boreDepth);
+    Storage = string.Join(";", rotation%4, index, state, gridSize, stepDist, boreDepth, Enum.GetName(typeof(GridStyle), gridStyle));
     Storage += "|" + string.Join(";", (hasHomePos ? 1 : 0), homePos.X, homePos.Y, homePos.Z);
     Storage += "|" + string.Join(";", (hasMinePos ? 1 : 0), minePos.X, minePos.Y, minePos.Z);
     Storage += "|" + string.Join(";", moveForw.X, moveForw.Y, moveForw.Z);
@@ -105,7 +113,7 @@ public void Main(string argument, UpdateType updateSource)
     model.tick();
     if(!hasHomePos && model.isConnected())
         bindHomeFromConnector(model);
-    if(!model.runDiagnostic(echoToScreens) || model.isUnderControl() || index >= (gridSize * gridSize))
+    if(!model.runDiagnostic(echoToScreens) || model.isUnderControl())
         setState(new String[]{"idle"});
     
     echoToScreens("Home position:", screensInfo);
@@ -123,7 +131,7 @@ public void Main(string argument, UpdateType updateSource)
     Vector3D direct = Vector3D.Multiply(getDirection(rotation), stepDist);
     echoToScreens("  "+String.Join(", ",Math.Round(direct.X,2), Math.Round(direct.Y,2), Math.Round(direct.Z,2)));
     
-    echoToScreens("Current job ("+gridSize+"x"+gridSize+"x"+stepDist+"m, "+boreDepth+"m)", screensInfo);
+    echoToScreens("Current job ("+gridSize+"x"+gridSize+"x"+stepDist+"m, "+boreDepth+"m, "+Enum.GetName(typeof(GridStyle), gridStyle).ToLower()+")", screensInfo);
     Vector3D digSite = getMiningPosition();
     echoToScreens("  "+String.Join(", ",Math.Round(digSite.X,2), Math.Round(digSite.Y,2), Math.Round(digSite.Z,2)), screensInfo);
     echoToScreens("  Travel Distance "+Math.Round((home-digSite).Length(), 2), screensInfo);
@@ -173,6 +181,8 @@ public void parseArg(String argument)
         stepDist = (double)Math.Abs(int.Parse(val.Split('=')[1]));
     else if(val.StartsWith("set_depth="))
         boreDepth = Math.Abs(int.Parse(val.Split('=')[1]));
+    else if(val.StartsWith("set_style="))
+        gridStyle = styleFromName(val.Split('=')[1]);
     else if(val.StartsWith("set_state="))
         setState(new String[]{val.Split('=')[1]});
     
@@ -187,7 +197,7 @@ public void load(String memory)
     
     // Operating data
     String[] data = lines[0].Split(';');
-    if(data.Length == 6)
+    if(data.Length == 7)
     {
         rotation = int.Parse(data[0]);
         index = int.Parse(data[1]);
@@ -195,6 +205,7 @@ public void load(String memory)
         gridSize = int.Parse(data[3]);
         stepDist = double.Parse(data[4]);
         boreDepth = int.Parse(data[5]);
+        gridStyle = styleFromName(data[6]);
     }
     if(--entries <= 0) return;
     
@@ -372,7 +383,7 @@ public static Vector3D getMiningPosition()
     
     int row = 0;
     int col = 0;
-    switch(STYLE)
+    switch(gridStyle)
     {
         case GridStyle.CORNER_SPIRAL:
             var layer = Math.Floor(Math.Sqrt(index));
@@ -434,7 +445,9 @@ public class Drone
     private IMyProgrammableBlock brain;
     private IMyRemoteControl remote;
     private IMyShipConnector connector;
+    private IMyShipConnector ejector;
     private List<IMyCargoContainer> cargo = new List<IMyCargoContainer>();
+    private List<IMyTerminalBlock> inventories = new List<IMyTerminalBlock>();
     private List<IMyGyro> gyros = new List<IMyGyro>();
     private List<IMyShipDrill> drills = new List<IMyShipDrill>();
     private List<IMyBatteryBlock> batteries = new List<IMyBatteryBlock>();
@@ -468,11 +481,16 @@ public class Drone
         program.GridTerminalSystem.GetBlocksOfType<IMyShipConnector>(connectors);
         foreach(var control in connectors)
             if(control.CubeGrid == localGrid)
-            {
-                control.CustomName = "TMT Connector";
-                connector = control;
-                break;
-            }
+                if(control.BlockDefinition.SubtypeId.ToLower().Contains("small"))
+                {
+                    control.CustomName = "TMT Ejector";
+                    ejector = control;
+                }
+                else
+                {
+                    control.CustomName = "TMT Connector";
+                    connector = control;
+                }
         
         List<IMyCargoContainer> boxes = new List<IMyCargoContainer>();
         program.GridTerminalSystem.GetBlocksOfType<IMyCargoContainer>(boxes);
@@ -482,6 +500,16 @@ public class Drone
                 box.CustomName = "TMT Cargo "+cargo.Count();
                 cargo.Add(box);
             }
+        List<IMyTerminalBlock> terminals = new List<IMyTerminalBlock>();
+        program.GridTerminalSystem.GetBlocksOfType<IMyTerminalBlock>(terminals);
+        foreach(var box in terminals)
+            if(box.CubeGrid == localGrid && box.HasInventory)
+                if(cargo.Count == 0 || cargo[0].GetInventory().CanTransferItemTo(box.GetInventory(), ores[0]))
+                {
+                    box.ShowInTerminal = false;
+                    box.ShowInToolbarConfig = false;
+                    inventories.Add(box);
+                }
         
         List<IMyGyro> gyroscopes = new List<IMyGyro>();
         program.GridTerminalSystem.GetBlocksOfType<IMyGyro>(gyroscopes);
@@ -607,6 +635,8 @@ public class Drone
             handleThrust(targetVel.Y, velocity.Y, pidY, mass, getThrusters(Base6Directions.Direction.Up), Math.Abs(grav)*mass);
             handleThrust(targetVel.Z, velocity.Z, pidZ, mass, getThrusters(Base6Directions.Direction.Backward), getThrusters(Base6Directions.Direction.Forward));
         }
+        
+        setDump((getTotalMass() / getMaxMass()) >= 0.95F);
     }
     
     public Vector3D toLocal(Vector3D vectorIn){ return Vector3D.TransformNormal(vectorIn, MatrixD.Transpose(remote.WorldMatrix)); }
@@ -680,15 +710,15 @@ public class Drone
             }
         }
         
-        if(cargo.Count == 0)
+        if(inventories.Count == 0)
         {
-            echo(" X No cargo containers");
+            echo(" X No containers");
             result = false;
         }
         else
         {
             bool functional = false;
-            foreach(var box in cargo)
+            foreach(var box in inventories)
                 if(box != null && box.IsFunctional)
                 {
                     functional = true;
@@ -697,7 +727,7 @@ public class Drone
             
             if(!functional)
             {
-                echo(" X  No functional cargo containers");
+                echo(" X  No functional containers");
                 result = false;
             }
         }
@@ -726,6 +756,8 @@ public class Drone
         
         if(!hasCollisionSensor())
             echo(" ? No operational collision sensor");
+        if(ejector == null || !ejector.IsFunctional || !ejector.Enabled)
+            echo(" ? No operational ejector");
         
         return result;
     }
@@ -735,15 +767,16 @@ public class Drone
     public bool hasCollisionSensor(){ return sensor != null && sensor.Enabled && sensor.IsFunctional; }
     public bool collisionAlarm(){ return hasCollisionSensor() ? sensor.IsActive : false; }
     
-    public List<IMyCargoContainer> getCargo(){ return cargo; }
-    public float getTotalMass(){ return remote == null ? 0F : remote.CalculateShipMass().PhysicalMass; }
+    public List<IMyTerminalBlock> getCargo(){ return inventories; }
+    public float getTotalMass(){ return remote == null ? 0F : remote.CalculateShipMass().TotalMass; }
     public float getMaxMass()
     {
         if(remote == null) return 0F;
         double gravity = getGravity().Length();
         
         float lift = 0F;
-        foreach(var thruster in getThrusters(Base6Directions.Direction.Up))
+        List<IMyThrust> thrusters = getThrusters(Base6Directions.Direction.Up);
+        foreach(var thruster in thrusters.GetRange(1, thrusters.Count-1))
             if(thruster != null && thruster.IsFunctional)
                 lift += thruster.MaxThrust;
         
@@ -755,7 +788,7 @@ public class Drone
     private float getCargoVolume()
     {
         float volume = 0F;
-        foreach(var box in cargo)
+        foreach(var box in inventories)
         {
             if(box == null || !box.IsFunctional) continue;
             IMyInventory inv = box.GetInventory();
@@ -765,7 +798,7 @@ public class Drone
     }
     public bool hasAnyOf(MyItemType item)
     {
-        foreach(var box in cargo)
+        foreach(var box in inventories)
             if(box.GetInventory().GetItemAmount(item).ToIntSafe() > 0)
                 return true;
         return false;
@@ -773,7 +806,7 @@ public class Drone
     public int getTotalOf(MyItemType item)
     {
         int tally = 0;
-        foreach(var box in cargo)
+        foreach(var box in inventories)
             tally += box.GetInventory().GetItemAmount(item).ToIntSafe();
         return tally;
     }
@@ -825,6 +858,8 @@ public class Drone
             gyro.GyroOverride = true;
             gyro.Pitch = (float)-axisPR.X;
             gyro.Roll = (float)-axisPR.Z;
+            
+            // TODO Implement yaw control to ensure forward orientation is preserved, mainly for neatness of mined areas
         }
     }
     
@@ -847,6 +882,7 @@ public class Drone
     
     public IMyShipConnector getConnector(){ return connector; }
     public void setConnector(bool on){ connector.Enabled = on; }
+    public void setDump(bool on){ if(ejector != null && ejector.IsFunctional) ejector.CollectAll = ejector.ThrowOut = on; }
     public bool isConnected(){ return connector.Status == MyShipConnectorStatus.Connected; }
     public MyShipConnectorStatus getConnectorStatus(){ return connector.Status; }
     public void toggleConnect(){ connector.ToggleConnect(); }
@@ -1073,9 +1109,11 @@ private class StateDeposit : State
         foreach(var box in model.getCargo())
         {
             IMyInventory inv = box.GetInventory();
-            double vol = (double)inv.CurrentVolume.ToIntSafe();
-            double max = (double)inv.MaxVolume.ToIntSafe();
-            echo("   * "+box.CustomName+": "+(int)(Math.Round(vol / max,2)*100)+"%");
+            double vol = (double)Math.Max(0,inv.CurrentVolume.ToIntSafe());
+            if(vol <= 0D) continue;
+            double max = (double)Math.Max(0, inv.MaxVolume.ToIntSafe());
+            double fill = Math.Max(0, Math.Round(vol/max,2))*100;
+            echo("   * "+box.CustomName+": "+(int)fill+"%");
         }
     }
     public override bool invalid(Drone model){ return model.isEmpty() && model.getTotalChargePercent() >= 0.8F; }
@@ -1095,6 +1133,11 @@ private class StateDetach : State
     
     public override void tick(int index, int rotation, Drone model, Action<string> echo)
     {
+        if(index >= (gridSize * gridSize))
+        {
+            echo(" X Mining job completed");
+            return;
+        }
         if(model.getTotalMass() > model.getMaxMass())
         {
             echo(" X Cannot safely undock, insufficient thrust for lift");
@@ -1169,7 +1212,7 @@ private class StateDig : State
     
     public StateDig() : base(new Controls[]{Controls.THRUSTERS, Controls.DRILLS}) { }
     
-    public bool canShipDig(Drone model){ return model.getTotalMass() < (model.getMaxMass() * 0.9F) && model.getTotalChargePercent() > 0.2F && (model.getWorldPosition()-digSite).Length() < boreDepth; }
+    public bool canShipDig(Drone model){ return (model.getTotalMass() / model.getMaxMass()) < 0.9F && !model.isFull() && model.getTotalChargePercent() > 0.2F && (model.getWorldPosition()-digSite).Length() < boreDepth; }
     
     public override void tick(int index, int rotation, Drone model, Action<string> echo)
     {
@@ -1177,6 +1220,8 @@ private class StateDig : State
         bool canDig = canShipDig(model);
         model.setDrills(canDig);
         bool empty = model.isEmpty();
+        if((model.getWorldPosition() - digSite).Length() >= boreDepth)
+            incFlag = true;
         
         if(canDig)
         {
@@ -1257,8 +1302,14 @@ private abstract class StateGo : State
         echo(" > Destination: "+String.Join(", ", Math.Round(destination.X,2), Math.Round(destination.Y,2), Math.Round(destination.Z,2)));
         echo(" > Direction: "+String.Join(", ", Math.Round(direction.X,2), Math.Round(direction.Y,2), Math.Round(direction.Z,2)));
         echo(" > Distance: "+Math.Round(dist,2));
+        
         model.setConnector(false);
-        if(dist > 0.5D)
+        
+        float weight = (model.getTotalMass() / model.getMaxMass());
+        bool needsEjector = weight > 0.95F;
+        if(needsEjector)
+            echo(" > Overweight: "+Math.Round(weight,2)*100+"%");
+        if(dist > 0.5D && !needsEjector)
         {
             Vector3D motion = direction;
             motion.Normalize();
