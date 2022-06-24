@@ -1,9 +1,13 @@
 // === Inter-Grid Communication Test ===
 const string signalChannel = "igc_test";
 const PacketHandler.SystemType type = PacketHandler.SystemType.DEBUG;
+bool ignoreStaticGrids = false;
 
 PacketHandler handler;
 List<long> listenerIds = new List<long>();
+
+IMyTextPanel screen;
+bool hasClearedScreen;
 
 private int ticksRunning;
 const String spinning = "-\\|/";
@@ -13,42 +17,58 @@ public Program()
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
     handler = new PacketHandler(signalChannel, Me, this, type);
     handler.ping();
+    
+    ignoreStaticGrids = !Me.CubeGrid.IsStatic;
+    
+    List<IMyTextPanel> panels = new List<IMyTextPanel>();
+    GridTerminalSystem.GetBlocksOfType<IMyTextPanel>(panels);
+    foreach(var panel in panels)
+        if(panel.CubeGrid == Me.CubeGrid)
+        {
+            screen = panel;
+            break;
+        }
 }
 
 public void Main(string argument, UpdateType updateSource)
 {
-    Echo("Running "+spinning[++ticksRunning % spinning.Length]);
+    hasClearedScreen = false;
+    echoToScreens("Running "+spinning[++ticksRunning % spinning.Length]);
+	echoToScreens("Local ID: "+Me.EntityId);
     
-    handler.tick(parseGlobal, parseLocal);
-    Echo(listenerIds.Count+" receivers");
-    if(argument.Length > 0)
+    if((updateSource & UpdateType.IGC) > 0)
+	{
+        handler.tick(parseGlobal, parseLocal);
+		return;
+	}
+    else if((updateSource & UpdateType.Terminal) > 0)
     {
-        if(argument.ToLower() == "ping")
-        {
-            listenerIds.Clear();
-            handler.ping();
-        }
-        else
-            handler.sendPacket(listenerIds, argument);
+        if(argument.Length > 0)
+            if(argument.ToLower() == "ping")
+            {
+                listenerIds.Clear();
+                handler.ping();
+            }
+            else
+                handler.sendPacket(listenerIds, argument);
+		return;
     }
     
+    echoToScreens(listenerIds.Count+" receivers");
+	foreach(long id in listenerIds)
+		echoToScreens(" * "+id);
+    
+    echoToScreens("Packets received: "+handler.packetsGlobal+"G "+handler.packetsLocal+"L");
     if(handler.lastPacketSent().Length > 0)
     {
-        Echo("Packet sent:");
-        foreach(var line in handler.lastPacketSent().ToLower().Split('|'))
-        Echo(" * "+line);
+        echoToScreens("Packet sent:");
+        showMessage(handler.lastPacketSent());
     }
     
     if(handler.lastPacketReceived().Length > 0)
     {
-        Echo("Packet received:");
-        string[] data = handler.lastPacketReceived().ToLower().Split('|');
-        Echo(" * "+data[0]);
-        Echo(" * "+data[1]);
-        string[] vecNum = data[2].Split(',');
-        Vector3D pos = new Vector3D(double.Parse(vecNum[0]), double.Parse(vecNum[1]), double.Parse(vecNum[2]));
-        Echo(" * "+String.Join(", ", Math.Round(pos.X,2), Math.Round(pos.Y,2), Math.Round(pos.Z,2)));
-        Echo(" * "+data[3]);
+        echoToScreens("Packet received:");
+        showMessage(handler.lastPacketReceived());
     }
     
     // Clean the listener list of objects we aren't connected to anymore
@@ -59,13 +79,42 @@ public void Main(string argument, UpdateType updateSource)
             listenerIds.Remove(id);
 }
 
+private void showMessage(String message)
+{
+    string[] data = handler.lastPacketReceived().Split('|');
+    for(int i=0; i<data.Length; i++)
+    {
+        String entry = data[i];
+        switch(i)
+        {
+            case 2:
+                string[] vecNum = entry.Split(',');
+                Vector3D pos = new Vector3D(double.Parse(vecNum[0]), double.Parse(vecNum[1]), double.Parse(vecNum[2]));
+                echoToScreens(" * "+String.Join(", ", Math.Round(pos.X,2), Math.Round(pos.Y,2), Math.Round(pos.Z,2)));
+                break;
+            default:
+                echoToScreens(" * "+entry);
+                break;
+        }
+    }
+}
+
+public void echoToScreens(string text)
+{
+    Echo(text);
+    if(screen != null && screen.IsFunctional && screen.Enabled)
+        screen.WriteText((hasClearedScreen ? "\n" : "") + text, hasClearedScreen);
+    hasClearedScreen = true;
+}
+
 public void parseGlobal(string arg, long entityID){ }
 
 public void parseLocal(string arg, long entityID)
 {
     string[] data = arg.Split('|');
-    if(data[0] == "response" && data[3] == Enum.GetName(typeof(PacketHandler.SystemType), type).ToLower() && isPartOfShip(entityID, false))
-        listenerIds.Add(entityID);
+    if(data[0] == "response" && data[3] == Enum.GetName(typeof(PacketHandler.SystemType), type).ToLower())
+        if(!listenerIds.Contains(entityID) && isPartOfShip(entityID, ignoreStaticGrids))
+            listenerIds.Add(entityID);
 }
 
 // Returns true if the given entity ID exists on this or any connected grid
@@ -166,13 +215,18 @@ public class PacketHandler
     public string lastPacketSent(){ return lastSent; }
     public string lastPacketReceived(){ return lastReceived; }
     
+    public int packetsGlobal = 0;
+    public int packetsLocal = 0;
+    
     public void tick(Action<string,long> parseGlobal, Action<string,long> parseLocal)
     {
+        long localId = block.EntityId;
         while(earGlobal.HasPendingMessage)
         {
             var message = earGlobal.AcceptMessage();
-            if(message.Tag == channel)
+            if(message.Tag == channel && message.Source != localId)
             {
+                packetsGlobal++;
                 lastReceived = message.Data.ToString().ToLower();
                 if(lastReceived == "ping")
                     sendPacket(message.Source, getPingResponse());
@@ -184,8 +238,9 @@ public class PacketHandler
         while(earLocal.HasPendingMessage)
         {
             var message = earLocal.AcceptMessage();
-            if(message.Tag == channel)
+            if(message.Tag == channel && message.Source != localId)
             {
+                packetsLocal++;
                 lastReceived = message.Data.ToString();
                 parseLocal(lastReceived, message.Source);
             }   
