@@ -1,32 +1,37 @@
 // == Termite Miner OS ==
-const string version = "1.5";
+const string version = "1.75";
+const string config_default = 
+    "[setup]\n;Number of clockwise 90 degree turns to apply\n;to the drone's forward mining direction\nrotation=0\n\n[mining_area]\n;Size of the drone's mining area\ngrid_size=10\n;Size of the drone's mining footprint\ncell_size=5\n;The maximum mining depth of each cell\nbore_depth=50\n;Grid search pattern (simple, corner_spiral, spiral, or offset)\nstyle=spiral";
 
 private List<IMyTextPanel> screensAll = new List<IMyTextPanel>();
 private List<IMyTextPanel> screensInfo = new List<IMyTextPanel>();
 private List<IMyTextPanel> screensState = new List<IMyTextPanel>();
 private bool hasClearedScreen = false;
 
-private static GridStyle gridStyle = GridStyle.CORNER_SPIRAL;
-private static int rotation = 0;
-private static int index=0;
-private static bool incFlag = false;
-private static int gridSize = 10;
-private static double stepDist = 5D;
+// Config values
+private static MyIni config = new MyIni();
+private static GridStyle gridStyle;
+private static int rotation;
+private static int gridSize;
+private static double stepDist;
+public static int boreDepth;
 
 private static bool hasHomePos = false;
 private static Vector3D homePos = new Vector3D(0,0,0);
+
 private static bool hasMinePos = false;
 private static Vector3D minePos = new Vector3D(0,0,0);
 private static Vector3D moveForw = new Vector3D(0, 0, 1);
 private static Vector3D moveRight = new Vector3D(-1, 0, 1);
-readonly static Matrix directionMatrix = new Matrix(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+private static int index=0;
+private static bool incFlag = false;
 
+readonly static Matrix directionMatrix = new Matrix(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
 static Dictionary<string, State> STATE_MAP = new Dictionary<String, State>();
 private string state = "idle";
 private int ticksInvalid = 0;
 
 public Drone model;
-public static int boreDepth = 40;
 private static MyItemType[] ores = new MyItemType[]
     {
         MyItemType.MakeOre("Iron"),
@@ -72,6 +77,9 @@ public Program()
     registerState("deposit", new StateDeposit());
     
     Me.CustomName = "TMT Drone Control";
+    if(Me.CustomData.Length == 0)
+        Me.CustomData = config_default;
+    loadData(Me.CustomData);
     model = new Drone(Me, this);
     
     List<IMyTextPanel> panels = new List<IMyTextPanel>();
@@ -91,7 +99,7 @@ public Program()
 
 public void Save()
 {
-    Storage = string.Join(";", rotation%4, index, state, gridSize, stepDist, boreDepth, Enum.GetName(typeof(GridStyle), gridStyle));
+    Storage = string.Join(";", index, state);
     Storage += "|" + string.Join(";", (hasHomePos ? 1 : 0), homePos.X, homePos.Y, homePos.Z);
     Storage += "|" + string.Join(";", (hasMinePos ? 1 : 0), minePos.X, minePos.Y, minePos.Z);
     Storage += "|" + string.Join(";", moveForw.X, moveForw.Y, moveForw.Z);
@@ -108,7 +116,7 @@ public void Main(string argument, UpdateType updateSource)
     
     if(argument.Length > 0)
         parseArg(argument);
-    load(Storage);
+    loadStorage(Storage);
     
     model.tick();
     if(!hasHomePos && model.isConnected())
@@ -118,22 +126,22 @@ public void Main(string argument, UpdateType updateSource)
     
     echoToScreens("Home position:", screensInfo);
     Vector3D home = getHomePosition();
-    echoToScreens("  "+String.Join(", ",Math.Round(home.X,2), Math.Round(home.Y,2), Math.Round(home.Z,2)));
+    echoToScreens("  "+vectorToString(home));
     
     Vector3D mine = getMinePosition();
     if((home - mine).Length() > stepDist)
     {
         echoToScreens("Mining position:", screensInfo);
-        echoToScreens("  "+String.Join(", ",Math.Round(mine.X,2), Math.Round(mine.Y,2), Math.Round(mine.Z,2)));
+        echoToScreens("  "+vectorToString(mine));
     }
     
     echoToScreens("Mining direction:", screensInfo);
     Vector3D direct = Vector3D.Multiply(getDirection(rotation), stepDist);
-    echoToScreens("  "+String.Join(", ",Math.Round(direct.X,2), Math.Round(direct.Y,2), Math.Round(direct.Z,2)));
+    echoToScreens("  "+vectorToString(direct));
     
     echoToScreens("Current job ("+gridSize+"x"+gridSize+"x"+stepDist+"m, "+boreDepth+"m, "+Enum.GetName(typeof(GridStyle), gridStyle).ToLower()+")", screensInfo);
     Vector3D digSite = getMiningPosition();
-    echoToScreens("  "+String.Join(", ",Math.Round(digSite.X,2), Math.Round(digSite.Y,2), Math.Round(digSite.Z,2)), screensInfo);
+    echoToScreens("  "+vectorToString(digSite), screensInfo);
     echoToScreens("  Travel Distance "+Math.Round((home-digSite).Length(), 2), screensInfo);
     Echo("");
     
@@ -158,6 +166,23 @@ public void Main(string argument, UpdateType updateSource)
     Save();
 }
 
+public void loadData(String customData)
+{
+    MyIniParseResult result;
+    if(!config.TryParse(customData, out result))
+    {
+        Runtime.UpdateFrequency = UpdateFrequency.Once;
+        throw new Exception(result.ToString());
+    }
+    
+    rotation = config.Get("setup", "rotation").ToInt32(0) % 4;
+    
+    gridSize = config.Get("mining_area", "grid_size").ToInt32(10);
+    stepDist = config.Get("mining_area", "cell_size").ToDouble(5D);
+    boreDepth = config.Get("mining_area", "bore_depth").ToInt32(50);
+    gridStyle = styleFromName(config.Get("mining_area","style").ToString("spiral"));
+}
+
 public void parseArg(String argument)
 {
     String val = argument.ToLower();
@@ -165,31 +190,19 @@ public void parseArg(String argument)
         reset();
     else if(val == "remodel")
         model = new Drone(Me, this);
-    else if(val == "turn")
-        rotation = (rotation + 1)%4;
-    else if(val.StartsWith("set_rotation="))
-        rotation = int.Parse(val.Split('=')[1]) % 4;
     else if(val.StartsWith("set_index="))
         index = int.Parse(val.Split('=')[1]);
     else if(val == "set_home")
         bindHomeFromConnector(model);
     else if(val == "set_mine")
         setMinePosition(model);
-    else if(val.StartsWith("set_grid="))
-        gridSize = Math.Abs(int.Parse(val.Split('=')[1]));
-    else if(val.StartsWith("set_size="))
-        stepDist = (double)Math.Abs(int.Parse(val.Split('=')[1]));
-    else if(val.StartsWith("set_depth="))
-        boreDepth = Math.Abs(int.Parse(val.Split('=')[1]));
-    else if(val.StartsWith("set_style="))
-        gridStyle = styleFromName(val.Split('=')[1]);
     else if(val.StartsWith("set_state="))
         setState(new String[]{val.Split('=')[1]});
     
     Save();
 }
 
-public void load(String memory)
+public void loadStorage(String memory)
 {
     reset();
     String[] lines = memory.ToLower().Split('|');
@@ -197,15 +210,10 @@ public void load(String memory)
     
     // Operating data
     String[] data = lines[0].Split(';');
-    if(data.Length == 7)
+    if(data.Length == 2)
     {
-        rotation = int.Parse(data[0]);
-        index = int.Parse(data[1]);
-        setState(new String[]{data[2]});
-        gridSize = int.Parse(data[3]);
-        stepDist = double.Parse(data[4]);
-        boreDepth = int.Parse(data[5]);
-        gridStyle = styleFromName(data[6]);
+        index = int.Parse(data[0]);
+        setState(new String[]{data[1]});
     }
     if(--entries <= 0) return;
     
@@ -328,6 +336,8 @@ public void echoToScreens(string text, List<IMyTextPanel> screens)
             screen.WriteText((hasClearedScreen ? "\n" : "") + text, hasClearedScreen);
     hasClearedScreen = true;
 }
+
+public static String vectorToString(Vector3D vector){ return String.Join(", ", Math.Round(vector.X,2), Math.Round(vector.Y,2), Math.Round(vector.Z,2)); }
 
 public static void increment()
 {
@@ -457,15 +467,18 @@ public class Drone
     private Dictionary<Base6Directions.Direction, List<IMyThrust>> thrustMap = new Dictionary<Base6Directions.Direction, List<IMyThrust>>();
     private PID pidX = new PID(), pidY = new PID(), pidZ = new PID();
     private Vector3D targetVelocity = new Vector3D(0, 0, 0);
+    private PID pidYaw = new PID();
     
     Vector3D forwRef;
     Vector3D downRef;
     Vector3D gravTarget;
+    MyGridProgram programTemp;
     
     public Drone(IMyProgrammableBlock me, MyGridProgram program)
     {
         localGrid = me.CubeGrid;
         brain = me;
+        programTemp = program;
         
         List<IMyRemoteControl> controls = new List<IMyRemoteControl>();
         program.GridTerminalSystem.GetBlocksOfType<IMyRemoteControl>(controls);
@@ -640,6 +653,7 @@ public class Drone
     }
     
     public Vector3D toLocal(Vector3D vectorIn){ return Vector3D.TransformNormal(vectorIn, MatrixD.Transpose(remote.WorldMatrix)); }
+    public Vector3D toWorld(Vector3D vectorIn){ return Vector3D.TransformNormal(vectorIn, remote.WorldMatrix); }
     
     public bool runDiagnostic(Action<string> echo)
     {
@@ -840,26 +854,43 @@ public class Drone
         var quatPitch = Quaternion.CreateFromAxisAngle(shipOrientation.Left, 0F);
         var quatRoll = Quaternion.CreateFromAxisAngle(shipOrientation.Backward, 0F);
         forwRef = Vector3D.Transform(shipOrientation.Forward, quatPitch * quatRoll);
-        forwRef.Y = 0;
         downRef = Vector3D.Transform(shipOrientation.Down, quatPitch * quatRoll);
         gravTarget = remote.GetNaturalGravity();
+    }
+    
+    public float currentFacingError()
+    {
+        return getFacingError(moveForw);
+    }
+    
+    public float getFacingError(Vector3D vector)
+    {
+        Vector3D forwLocal = toLocal(vector);
+        double yawV = Math.Atan2(forwLocal.Z, forwLocal.X);
+        double yawL = Math.Atan2(forwRef.Z, forwRef.X);
+        return (float)MathHelper.ToDegrees(yawL - yawV) + (rotation * 90F);
     }
     
     private void updateLevelling()
     {
         resetGyros();
+        double error = currentFacingError();
+        double currentSpin = toLocal(remote.GetShipVelocities().AngularVelocity).Y;
+        double spin = hasMinePos && Math.Abs(error) > 1 && currentSpin < 5 ? -MathHelper.Clamp(error, -10, 10) * 0.1D : 0D;
+        
         foreach(var gyro in gyros)
         {
             if(gyro == null || !gyro.Enabled || !gyro.IsFunctional) continue;
+            gyro.GyroOverride = true;
             Matrix localOrientation;
             gyro.Orientation.GetMatrix(out localOrientation);
-            var axisPR = getGyroVec(gravTarget, downRef, gyro.WorldMatrix.GetOrientation(), localOrientation);
             
-            gyro.GyroOverride = true;
+            if(Vector3D.TransformNormal(Vector3D.Up, gyro.WorldMatrix) == toWorld(Vector3D.Up))
+                gyro.Yaw = (float)spin;
+            
+            var axisPR = getGyroVec(gravTarget, downRef, gyro.WorldMatrix.GetOrientation(), localOrientation);
             gyro.Pitch = (float)-axisPR.X;
             gyro.Roll = (float)-axisPR.Z;
-            
-            // TODO Implement yaw control to ensure forward orientation is preserved, mainly for neatness of mined areas
         }
     }
     
@@ -1299,8 +1330,8 @@ private abstract class StateGo : State
         destination = getDestination(index, rotation, model);
         Vector3D direction = (destination - model.getWorldPosition());
         double dist = distance(model);
-        echo(" > Destination: "+String.Join(", ", Math.Round(destination.X,2), Math.Round(destination.Y,2), Math.Round(destination.Z,2)));
-        echo(" > Direction: "+String.Join(", ", Math.Round(direction.X,2), Math.Round(direction.Y,2), Math.Round(direction.Z,2)));
+        echo(" > Destination: "+vectorToString(destination));
+        echo(" > Direction: "+vectorToString(direction));
         echo(" > Distance: "+Math.Round(dist,2));
         
         model.setConnector(false);
