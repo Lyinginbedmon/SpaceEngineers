@@ -843,7 +843,7 @@ public abstract class State
             {
                 case Controls.THRUSTERS: model.clearTargetVelocity(); break;
                 case Controls.GYROS: model.clearTargetFacing(); break;
-                case Controls.CONNECTOR: model.setConnector(true); if(model.isConnected()) model.toggleConnect();; break;
+                case Controls.CONNECTOR: model.setConnector(true); if(model.isConnected()) model.toggleConnect(); break;
                 case Controls.BATTERIES: model.resetBatteries(); break;
                 case Controls.SENSOR: model.setSensor(true); break;
                 case Controls.LIGHT: light.Enabled = true; break;
@@ -895,6 +895,9 @@ public class StateRise : State
     {
         double altitude = model.getAltitude();
         echo("   > Altitude: "+Math.Round(altitude,2));
+        
+        if(model.isConnected())
+            model.toggleConnect();
         
         if(!lowAltitudeWarning(0))
             model.clearTargetVelocity();
