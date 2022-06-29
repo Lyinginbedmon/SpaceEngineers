@@ -1,8 +1,8 @@
 // == Hermit Crab Delivery Drone OS ==
-const string version = "2.5";
+const string version = "2.8";
 const String spinning = "-\\|/";
 const String config_default = 
-    "[setup]\n;Name of the forward indicator light\nindicator_light=Interior Light\n\n[travel]\n;Style of travel (either forward or lateral)\nmove_style=forward\n;Top speed for this drone\nmax_speed=50\n;Yaw offset for this drone to face a given direction\nyaw_offset=0\n\n[altitude]\n;Whether this drone should ignore cockpit altitude readings\nignore_altitude=false\n;Minimum altitude this drone should maintain during travel\nmin_altitude=50";
+    "[setup]\n;Prefix of this drone\nname_prefix=HMC\n;Name of the forward indicator light\nindicator_light=Interior Light\n\n[travel]\n;Style of travel (either forward or lateral)\nmove_style=forward\n;Top speed for this drone\nmax_speed=50\n;Yaw offset for this drone to face a given direction\nyaw_offset=0\n\n[altitude]\n;Whether this drone should ignore cockpit altitude readings\nignore_altitude=false\n;Minimum altitude this drone should maintain during travel\nminimum_altitude=50\nmaximum_altitude=75";
 
 // Drone model
 public static Drone model;
@@ -12,23 +12,41 @@ public static IMyTextPanel screen;
 
 // Config variables
 private static MyIni config = new MyIni();
+private static string namePrefix;
 private static string lightName;
 public static MoveStyle moveStyle;
 public static double maxSpeed;
 public static float yawOffset;
 public static bool ignoreAltitude;
 public static int minAltitude;
+public static int maxAltitude;
 
 readonly static Matrix directionMatrix = new Matrix(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
 private static Dictionary<string, State> STATE_MAP = new Dictionary<String, State>();
 private string state = "idle";
 
-public static int targetGPS = -1;
+public static TravelDirection direction = TravelDirection.START;
+public static int currentWaypoint = -1;
 private static Vector3D destination;
+private static int targetAltitude = -1;
+private static int altitudeRange = 0;
 
 private static int ticksRunning;
 private bool hasClearedScreen;
 
+public enum TravelDirection
+{
+    START,
+    END
+}
+private static TravelDirection directionFromName(String nameIn)
+{
+    nameIn = nameIn.ToLower();
+    foreach(TravelDirection style in Enum.GetValues(typeof(TravelDirection)))
+        if(Enum.GetName(typeof(TravelDirection), style).ToLower() == nameIn)
+            return style;
+    return TravelDirection.START;
+}
 public enum MoveStyle
 {
     FORWARD,
@@ -48,17 +66,19 @@ public Program()
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
     registerState("stop", new StateStop());
     registerState("stabilise", new StateStabilise());
-    registerState("rise", new StateRise());
+    registerState("altitude", new StateAltitude());
     registerState("point", new StatePoint());
     registerState("move", new StateMove());
     registerState("lateral", new StateMoveLateral());
     registerState("land", new StateLand());
     registerState("land2", new StateLandPrecise());
+    registerState("lowBat", new StateLowPower());
     
-    Me.CustomName = "Drone Control";
     if(Me.CustomData.Length == 0)
         Me.CustomData = config_default;
     loadData(Me.CustomData);
+    Me.CubeGrid.CustomName = namePrefix;
+    Me.CustomName = namePrefix+" Control";
     
     model = new Drone(Me, this);
     light = (IMyLightingBlock)GridTerminalSystem.GetBlockWithName(lightName);
@@ -74,6 +94,8 @@ public Program()
     foreach(var panel in panels)
         if(panel.CubeGrid == Me.CubeGrid)
         {
+            panel.CustomName = namePrefix + " Status Screen";
+            panel.Enabled = true;
             screen = panel;
             break;
         }
@@ -81,7 +103,7 @@ public Program()
 
 public void Save()
 {
-    Storage = String.Join(";", state, targetGPS);
+    Storage = String.Join(";", state, direction == TravelDirection.START ? 0 : 1, currentWaypoint);
 }
 
 public void Main(string argument, UpdateType updateSource)
@@ -96,13 +118,18 @@ public void Main(string argument, UpdateType updateSource)
     
     model.tick(Echo);
     if(!model.diagnostic(Echo))
+    {
         setState("idle");
+        model.setBroadcast("ERROR");
+        return;
+    }
     
-    MyWaypointInfo waypoint = getWaypoint();
+    Echo("\nCurrent flight path: "+Enum.GetName(typeof(TravelDirection), direction)+" ("+currentWaypoint+")");
+    MyWaypointInfo waypoint = getCurrentWaypoint();
     if(waypoint.IsEmpty())
         return;
     destination = waypoint.Coords;
-    Echo("\nDestination: "+waypoint.Name);
+    Echo("Destination: "+waypoint.Name);
     Echo("Coords: "+String.Join(", ", Math.Round(destination.X,2), Math.Round(destination.Y,2), Math.Round(destination.Z,2)));
     
     Echo("Available States:");
@@ -136,6 +163,7 @@ public void loadData(String customData)
         throw new Exception(result.ToString());
     }
     
+    namePrefix = config.Get("setup", "name_prefix").ToString("HMC");
     lightName = config.Get("setup", "indicator_light").ToString("Interior Light");
     
     moveStyle = styleFromName(config.Get("travel", "move_style").ToString("forward"));
@@ -143,7 +171,11 @@ public void loadData(String customData)
     maxSpeed = config.Get("travel", "max_speed").ToDouble(50D);
     
     ignoreAltitude = config.Get("altitude", "ignore_altitude").ToBoolean(false);
-    minAltitude = config.Get("altitude", "minimum_altitude").ToInt32(50);
+    int altA = config.Get("altitude", "minimum_altitude").ToInt32(50);
+    int altB = config.Get("altitude", "maximum_altitude").ToInt32(75);
+    minAltitude = Math.Min(altA, altB);
+    maxAltitude = Math.Max(altA, altB);
+    altitudeRange = maxAltitude - minAltitude;
 }
 
 public void parseArg(String argument)
@@ -153,14 +185,17 @@ public void parseArg(String argument)
         reset();
     else if(val == "remodel")
         model = new Drone(Me, this);
-    else if(val.StartsWith("set_gps="))
-        targetGPS = (int)clamp(int.Parse(val.Split('=')[1]), -1, 1);
+    else if(val.StartsWith("set_direction="))
+        direction = directionFromName(val.Split('=')[1].ToLower());
+    else if(val.StartsWith("set_index="))
+        currentWaypoint = (int)clamp(int.Parse(val.Split('=')[1]), 0, model.getWaypoints().Count - 1);
     else if(val.StartsWith("set_state="))
         setState(val.Split('=')[1]);
     else if(val == "deliver" && model.getTotalChargePercent() > 0.8F)
     {
-        targetGPS = (int)clamp(targetGPS, 0, 1) == 0 ? 1 : 0;
-        setState("rise");
+        currentWaypoint = direction == TravelDirection.START ? 1 : model.getWaypoints().Count - 2;
+        direction = direction == TravelDirection.START ? TravelDirection.END : TravelDirection.START;
+        setState("altitude");
     }
     
     Save();
@@ -174,10 +209,11 @@ public void loadStorage(String memory)
     
     // Operating data
     String[] data = lines[0].Split(';');
-    if(data.Length == 2)
+    if(data.Length == 3)
     {
         setState(data[0]);
-        targetGPS = int.Parse(data[1]);
+        direction = int.Parse(data[1]) > 0 ? TravelDirection.END : TravelDirection.START;
+        currentWaypoint = int.Parse(data[2]);
     }
     if(--entries <= 0) return;
 }
@@ -230,9 +266,24 @@ private void setState(String statesIn)
     Save();
 }
 
-public MyWaypointInfo getWaypoint()
+public MyWaypointInfo getCurrentWaypoint()
 {
-    return model.getWaypoint(targetGPS);
+    return model.getWaypoint(currentWaypoint);
+}
+
+public static bool isFinalDestination()
+{
+    return isFinalDestination(currentWaypoint);
+}
+
+public static bool isFinalDestination(int index)
+{
+    return direction == TravelDirection.START ? index == 0 : index == model.getWaypoints().Count - 1;
+}
+
+public static void incrementWaypoint()
+{
+    currentWaypoint += direction == TravelDirection.START ? -1 : 1;
 }
 
 // #### UTILITY FUNCTIONS ####
@@ -259,19 +310,46 @@ public static float clamp(float val, float min, float max)
     return Math.Max(minVal, Math.Min(maxVal, val));
 }
 
-public static bool lowAltitudeWarning(int offset)
+public static bool isInRange(int val, int min, int max){ return val >= min && val <= max; }
+
+public static int currentTargetAltitude()
 {
-    return model.collisionAlarm() || !ignoreAltitude && model.getAltitude() < (minAltitude - offset);
+    if(targetAltitude < 0)
+        targetAltitude = minAltitude;
+    
+    /*
+        If we are not in imminent danger of collision, allow target altitude to recede to configured altitude.
+        This causes the target to drop when flying over lower terrain, reducing the need to descend.
+    */
+    if(targetAltitude > minAltitude && !model.collisionAlarm())
+    {
+        int current = targetAltitude - (ticksRunning%100 == 0 ? 1 : 0);
+        int nextVal = (int)clamp(current, minAltitude, (int)model.getAltitude());
+        int delta = nextVal - current;
+        targetAltitude += Math.Sign(delta);
+    }
+    
+    return targetAltitude;
+}
+
+public static bool altitudeWarning()
+{
+    int currentAltitude = (int)model.getAltitude();
+    int target = currentTargetAltitude();
+    return model.collisionAlarm() || !(ignoreAltitude || isInRange(currentAltitude, target, target + altitudeRange * 2));
 }
 
 public class Drone
 {
     // Remote control
     private IMyRemoteControl remote;
+    // Antenna
+    private IMyRadioAntenna antenna;
     // Gyroscopes
     private List<IMyGyro> gyros = new List<IMyGyro>();
     // Terrain sensor
     private IMySensorBlock sensor;
+    private IMyCameraBlock camera;
     // Docking connector
     private IMyShipConnector connector;
     // All batteries
@@ -286,6 +364,9 @@ public class Drone
     private Vector3D forwRef;
     private Vector3D downRef;
     private Vector3D gravTarget;
+    private double latestAltitude = 0;
+    
+    private String broadcastMessage = "";
     
     public Drone(IMyProgrammableBlock me, MyGridProgram program)
     {
@@ -294,25 +375,56 @@ public class Drone
         foreach(var controller in remotes)
             if(controller.CubeGrid == me.CubeGrid && controller.IsFunctional)
             {
-                controller.CustomName = "Drone Remote";
+                controller.CustomName = namePrefix+" Remote";
                 controller.DampenersOverride = true;
                 remote = controller;
                 break;
             }
         
+        List<IMyRadioAntenna> radios = new List<IMyRadioAntenna>();
+        program.GridTerminalSystem.GetBlocksOfType<IMyRadioAntenna>(radios);
+        foreach(var radio in radios)
+            if(radio.CubeGrid == me.CubeGrid && radio.IsFunctional)
+            {
+                radio.CustomName = namePrefix+" Antenna";
+                radio.EnableBroadcasting = true;
+                antenna = radio;
+                break;
+            }
+        
+        
         List<IMyGyro> gyros2 = new List<IMyGyro>();
         program.GridTerminalSystem.GetBlocksOfType<IMyGyro>(gyros2);
         foreach(var gyro in gyros2)
             if(gyro.CubeGrid == me.CubeGrid)
+            {
+                gyro.CustomName = namePrefix+" Gyro "+gyros.Count;
+                gyro.Enabled = true;
+                gyro.ShowInTerminal = false;
+                gyro.ShowInToolbarConfig = false;
                 gyros.Add(gyro);
+            }
         
         foreach(var direction in Base6Directions.EnumDirections)
             thrustMap[direction] = new List<IMyThrust>();
         if(remote != null)
         {
+            List<IMyShipConnector> connectors = new List<IMyShipConnector>();
+            program.GridTerminalSystem.GetBlocksOfType<IMyShipConnector>(connectors);
+            foreach(var connect in connectors)
+                if(connect.CubeGrid == me.CubeGrid && getLocalFacing(connect, remote) == directionMatrix.Up)
+                {
+                    connect.CustomName = namePrefix+" Parking Connector";
+                    connect.Enabled = true;
+                    connect.ShowInToolbarConfig = false;
+                    
+                    connector = connect;
+                }
+            
             List<IMyThrust> thrusters2 = new List<IMyThrust>();
             program.GridTerminalSystem.GetBlocksOfType<IMyThrust>(thrusters2);
             foreach(var thruster in thrusters2)
+            {
                 if(thruster.CubeGrid == me.CubeGrid)
                 {
                     thruster.ShowInTerminal = false;
@@ -335,25 +447,26 @@ public class Drone
                     else
                     {
                         thruster.Enabled = false;
-                        thruster.CustomName = "Unrecognised Thruster";
+                        thruster.CustomName = namePrefix+" Unrecognised Thruster";
                         continue;
                     }
                     
                     thrusters.Add(thruster);
                     registerThruster(thruster, localFace);
-                    thruster.CustomName = "Thruster "+(Enum.GetName(typeof(Base6Directions.Direction), localFace)[0]+""+getThrusters(localFace).Count);
+                    thruster.CustomName = namePrefix+" Thruster "+(Enum.GetName(typeof(Base6Directions.Direction), localFace)[0]+""+getThrusters(localFace).Count);
                 }
+            }
             
-            List<IMyShipConnector> connectors = new List<IMyShipConnector>();
-            program.GridTerminalSystem.GetBlocksOfType<IMyShipConnector>(connectors);
-            foreach(var connect in connectors)
-                if(connect.CubeGrid == me.CubeGrid && getLocalFacing(connect, remote) == directionMatrix.Up)
+            List<IMyCameraBlock> cameras = new List<IMyCameraBlock>();
+            program.GridTerminalSystem.GetBlocksOfType<IMyCameraBlock>(cameras);
+            foreach(var cam in cameras)
+                if(cam.CubeGrid == me.CubeGrid && getLocalFacing(cam, remote) == directionMatrix.Up)
                 {
-                    connect.CustomName = "Docking Connector";
-                    connect.Enabled = true;
-                    connect.ShowInToolbarConfig = false;
-                    
-                    connector = connect;
+                    cam.CustomName = namePrefix+" Altitude Sensor";
+                    cam.Enabled = true;
+                    cam.EnableRaycast = true;
+                    camera = cam;
+                    break;
                 }
         }
         
@@ -362,12 +475,12 @@ public class Drone
         foreach(var sense in sensors)
             if(sense.CubeGrid == me.CubeGrid && sense.IsFunctional)
             {
-                sense.CustomName = "Terrain Sensor";
+                sense.CustomName = namePrefix+" Collision Sensor";
                 sense.Enabled = true;
                 
                 Vector3 faceVec = getLocalFacing(sense, remote);
-                sense.BackExtend = faceVec.Y <= 0 ? int.MaxValue : 0;
-                sense.FrontExtend = faceVec.Y >= 0 ? int.MaxValue : 0;
+                sense.BackExtend = faceVec.Y <= 0 ? 20 : 0;
+                sense.FrontExtend = faceVec.Y >= 0 ? 20 : 0;
                 sense.RightExtend = sense.LeftExtend = sense.TopExtend = sense.BottomExtend = int.MaxValue;
                 
                 sense.DetectAsteroids = true;
@@ -388,7 +501,7 @@ public class Drone
         foreach(var battery in bats)
             if(battery.CubeGrid == me.CubeGrid)
             {
-                battery.CustomName = "Battery "+batteries.Count;
+                battery.CustomName = namePrefix+" Battery "+batteries.Count;
                 battery.ShowInTerminal = false;
                 battery.ShowInToolbarConfig = false;
                 batteries.Add(battery);
@@ -397,10 +510,24 @@ public class Drone
     
     public void tick(Action<string> echo)
     {
-        if(remote == null || !remote.IsFunctional || remote.IsUnderControl)
+        if(antenna != null && antenna.IsFunctional)
         {
-            resetGyros();
-            resetThrusters(thrusters);
+            if(broadcastMessage.Length > 0)
+                antenna.HudText = broadcastMessage;
+            else
+                antenna.HudText = "";
+            antenna.ShowShipName = broadcastMessage.Length == 0;
+        }
+        
+        if(remote.IsUnderControl)
+        {
+            disableControl();
+            return;
+        }
+        else if(remote == null || !remote.IsFunctional)
+        {
+            disableControl();
+            setBroadcast("IN DISTRESS");
             return;
         }
         
@@ -422,6 +549,12 @@ public class Drone
         handleThrust(targetVel.X, velocity.X, pidX, mass, getThrusters(Base6Directions.Direction.Right), getThrusters(Base6Directions.Direction.Left));
         handleThrust(targetVel.Y, velocity.Y, pidY, mass, getThrusters(Base6Directions.Direction.Up), Math.Abs(grav)*mass);
         handleThrust(targetVel.Z, velocity.Z, pidZ, mass, getThrusters(Base6Directions.Direction.Backward), getThrusters(Base6Directions.Direction.Forward));
+    }
+    
+    private void disableControl()
+    {
+        resetGyros();
+        resetThrusters(thrusters);
     }
     
     // Runs a diagnostic of all vital components and returns true if they all pass
@@ -500,20 +633,32 @@ public class Drone
         
         if(connector == null || !connector.IsFunctional)
         {
-            echo(" X No functional docking connector");
+            echo(" X No functional parking connector");
             pass = false;
         }
+        
+        if(camera == null || !camera.IsFunctional)
+            echo(" ? Missing altitude camera");
+        
+        if(antenna == null || !antenna.IsFunctional)
+            echo(" ? Missing antenna");
         
         if(light == null)
             echo(" ? Missing indicator light named "+lightName);
         
         return pass;
     }
-
-    public MyWaypointInfo getWaypoint(int index)
+    
+    public List<MyWaypointInfo> getWaypoints()
     {
         List<MyWaypointInfo> waypoints = new List<MyWaypointInfo>();
         remote.GetWaypointInfo(waypoints);
+        return waypoints;
+    }
+    
+    public MyWaypointInfo getWaypoint(int index)
+    {
+        List<MyWaypointInfo> waypoints = getWaypoints();
         index = (int)clamp(index, 0, waypoints.Count - 1);
         
         return waypoints[index];
@@ -526,24 +671,48 @@ public class Drone
     public Vector3D toLocal(Vector3D vectorIn){ return Vector3D.TransformNormal(vectorIn, MatrixD.Transpose(remote.WorldMatrix)); }
     public Vector3D toWorld(Vector3D vectorIn){ return Vector3D.TransformNormal(vectorIn, remote.WorldMatrix); }
     
-    public void setSensor(bool onOff){ if(sensor == null) return; sensor.Enabled = onOff; }
+    public void setSensor(bool onOff){ if(sensor != null) sensor.Enabled = onOff; }
+    
+    public void setBroadcast(String messageIn)
+    {
+        if(messageIn.Length > 0 && !messageIn.StartsWith(namePrefix))
+            messageIn = namePrefix + " " + messageIn;
+        broadcastMessage = messageIn;
+    }
     
     public double getAltitude()
     {
-        double altSea = 0D;
-        double altVox = 0D;
-        remote.TryGetPlanetElevation(MyPlanetElevation.Sealevel, out altSea);
-        remote.TryGetPlanetElevation(MyPlanetElevation.Surface, out altVox);
-        return Math.Min(altSea, altVox);
+        if(camera == null || !(camera.Enabled && camera.IsFunctional))
+        {
+            // If camera is absent or non-functional, use cockpit reading
+            // WARNING! This reading is drawn from voxels at worldgen and can be very inaccurate
+            double altSea = 0D;
+            double altVox = 0D;
+            remote.TryGetPlanetElevation(MyPlanetElevation.Sealevel, out altSea);
+            remote.TryGetPlanetElevation(MyPlanetElevation.Surface, out altVox);
+            return Math.Min(altSea, altVox);
+        }
+        
+        camera.EnableRaycast = true;
+        int scanDist = Math.Max(1000, minAltitude);
+        if(camera.CanScan(scanDist))
+        {
+            MyDetectedEntityInfo scan = camera.Raycast(scanDist);
+            if(scan.IsEmpty())
+                latestAltitude = scanDist + 1;
+            else if(scan.HitPosition.HasValue)
+                latestAltitude = (camera.GetPosition() - scan.HitPosition.Value).Length();
+        }
+        return latestAltitude;
     }
-
+    
     public bool collisionAlarm(){ return sensor != null && sensor.Enabled && sensor.IsActive; }
     
     public IMyShipConnector getConnector(){ return connector; }
-    public void setConnector(bool on){ connector.Enabled = on; }
-    public bool isConnected(){ return connector.Status == MyShipConnectorStatus.Connected; }
-    public MyShipConnectorStatus getConnectorStatus(){ return connector.Status; }
-    public void toggleConnect(){ connector.ToggleConnect(); }
+    public void setConnector(bool on){ if(connector != null) connector.Enabled = on; }
+    public bool isConnected(){ return (connector == null || !connector.IsFunctional) ? false : connector.Status == MyShipConnectorStatus.Connected; }
+    public MyShipConnectorStatus getConnectorStatus(){ return connector == null || !connector.IsFunctional ? MyShipConnectorStatus.Unconnected : connector.Status; }
+    public void toggleConnect(){ if(connector != null) connector.ToggleConnect(); }
     
     public void setTargetFacing(Vector3D face){ targetFacing = face; }
     public void clearTargetFacing(){ setTargetFacing(new Vector3D(0, 0, 0)); }
@@ -618,6 +787,7 @@ public class Drone
     {
         foreach(var gyro in gyros)
         {
+            if(gyro == null || !gyro.IsFunctional) continue;
             gyro.GyroOverride = false;
             gyro.Pitch = 0F;
             gyro.Yaw = 0F;
@@ -691,7 +861,10 @@ public class Drone
         thrustMap[direction] = set;
     }
     
-    public void setTargetVelocity(Vector3D vel){ targetVelocity = vel; }
+    public void setTargetVelocity(Vector3D vel)
+    {
+        targetVelocity = vel;
+    }
     public void clearTargetVelocity(){ targetVelocity = new Vector3D(0, 0, 0); }
     
     private List<IMyThrust> getThrusters(Base6Directions.Direction face)
@@ -703,7 +876,7 @@ public class Drone
     {
         foreach(var thruster in group)
         {
-            if(thruster == null) continue;
+            if(thruster == null || !thruster.IsFunctional) continue;
             thruster.Enabled = true;
             thruster.ThrustOverride = 0F;
         }
@@ -722,10 +895,24 @@ public class Drone
     private void handleThrust(double target, double current, PID pid, double mass, List<IMyThrust> groupA, List<IMyThrust> groupB, double offset)
     {
         int tallyA = 0;
-        foreach(var thruster in groupA) if(thruster != null && thruster.IsFunctional) tallyA++;
+        float avgThrustA = 0F;
+        foreach(var thruster in groupA)
+            if(thruster != null && thruster.IsFunctional)
+            {
+                tallyA++;
+                avgThrustA += thruster.MaxThrust;
+            }
+        avgThrustA /= tallyA;
         
         int tallyB = 0;
-        foreach(var thruster in groupB) if(thruster != null && thruster.IsFunctional) tallyB++;
+        float avgThrustB = 0F;
+        foreach(var thruster in groupB)
+            if(thruster != null && thruster.IsFunctional)
+            {
+                tallyB++;
+                avgThrustB += thruster.MaxThrust;
+            }
+        avgThrustB /= tallyB;
         
         if(target != 0F)
         {
@@ -733,12 +920,11 @@ public class Drone
             
             // Total thrust needed (N)
             double totalThrust = offset + pidVal;
-            
             foreach(var thruster in groupA)
             {
                 if(thruster == null || !thruster.IsFunctional) continue;
                 thruster.Enabled = totalThrust > 0F;
-                thruster.ThrustOverride = thruster.Enabled ? (float)totalThrust / tallyA : 0F;
+                thruster.ThrustOverride = thruster.Enabled ? (float)(Math.Abs(totalThrust) / tallyA) * (thruster.MaxThrust / avgThrustA) : 0F;
             }
             
             totalThrust -= offset;
@@ -746,7 +932,7 @@ public class Drone
             {
                 if(thruster == null || !thruster.IsFunctional) continue;
                 thruster.Enabled = totalThrust < 0F;
-                thruster.ThrustOverride = thruster.Enabled ? (float)Math.Abs(totalThrust) / tallyB : 0F;
+                thruster.ThrustOverride = thruster.Enabled ? (float)(Math.Abs(totalThrust) / tallyB) * (thruster.MaxThrust / avgThrustB) : 0F;
             }
         }
         else
@@ -847,17 +1033,19 @@ public abstract class State
                 case Controls.BATTERIES: model.resetBatteries(); break;
                 case Controls.SENSOR: model.setSensor(true); break;
                 case Controls.LIGHT: light.Enabled = true; break;
+                case Controls.ANTENNA: model.setBroadcast(null); break;
             }
     }
     
-    protected enum Controls
+    public enum Controls
     {
         THRUSTERS,
         GYROS,
         CONNECTOR,
         BATTERIES,
         SENSOR,
-        LIGHT
+        LIGHT,
+        ANTENNA
     }
 }
 
@@ -872,6 +1060,7 @@ public class StateStop : State
         echo("   > "+(charge >= 0.8F ? "Launch ready" : "Recharging"));
         model.doCharging();
         model.setSensor(false);
+        targetAltitude = -1;
     }
     
     public override bool invalid(Drone model){ return model.getAltitude() > 5 && !model.isConnected(); }
@@ -887,36 +1076,70 @@ public class StateStabilise : State
     public override String exitState(Drone model){ return "point"; }
 }
 
-public class StateRise : State
+public class StateAltitude : State
 {
-    public StateRise() : base(new Color(255, 0, 0), new Controls[]{Controls.THRUSTERS}){ }
+    private bool initialCollision;
+    public StateAltitude() : base(new Color(255, 0, 0), new Controls[]{Controls.THRUSTERS}){ }
+    
+    public override void enter(Vector3D destination, Drone model){ initialCollision = model.collisionAlarm(); }
     
     public override void tick(Vector3D destination, Drone model, Action<string> echo)
     {
         double altitude = model.getAltitude();
-        echo("   > Altitude: "+Math.Round(altitude,2));
+        int targetAlt = currentTargetAltitude();
+        bool collision = model.collisionAlarm();
         
         if(model.isConnected())
             model.toggleConnect();
         
-        if(!lowAltitudeWarning(0))
+        int offset = altitudeRange / 4;
+        bool goodAlt = altitude >= (targetAlt + offset) && altitude <= (targetAlt + altitudeRange - offset);
+        if(collision)
+        {
+            // If altitude is too high but the collision alarm is going off, increase target to current altitude
+            if(altitude >= (targetAltitude + altitudeRange))
+                targetAltitude = (int)altitude;
+            // If altitude is within range but the collision alarm is going off, increase target altitude.
+            else if(goodAlt)
+                targetAltitude += 1;
+        }
+        
+        int target = targetAltitude + (altitudeRange / 2);
+        int error = target - (int)altitude;
+        
+        echo("   > Altitude: "+targetAltitude+" << "+Math.Round(altitude, 2)+" >> "+(targetAltitude + altitudeRange));
+        if(collision)
+            echo("     > Collision Alarm!");
+        
+        if(goodAlt && !collision)
             model.clearTargetVelocity();
         else
         {
-            double speed = model.collisionAlarm() ? 15 : clamp(minAltitude - (int)altitude, 1, 100);
+            int speed = (int)Math.Round((double)error / 10, 0);
+            if(Math.Abs(speed) < 1)
+                speed = Math.Sign(speed);
+            
             Vector3D gravity = model.getGravity();
             gravity.Normalize();
+            gravity = Vector3D.Multiply(gravity, -1);
             
-            model.setTargetVelocity(Vector3D.Multiply(gravity, -speed));
+            model.setTargetVelocity(Vector3D.Multiply(gravity, speed));
         }
     }
     
-    public override bool invalid(Drone model){ return !lowAltitudeWarning(0); }
+    public override bool invalid(Drone model)
+    {
+        double altitude = model.getAltitude();
+        int targetAlt = currentTargetAltitude();
+        int offset = altitudeRange / 4;
+        return model.getShipVelocities().Length() < 1 && !model.collisionAlarm() && altitude >= (targetAlt + offset) && altitude <= (targetAlt + altitudeRange - offset);
+    }
     public override String exitState(Drone model){ return "point"; }
 }
 
 public class StatePoint : State
 {
+    private Vector3D dest;
     public StatePoint() : base(new Color(255, 165, 0), new Controls[]{Controls.GYROS}){ }
     
     public override void tick(Vector3D destination, Drone model, Action<string> echo)
@@ -924,7 +1147,8 @@ public class StatePoint : State
         if(moveStyle != MoveStyle.FORWARD)
             return;
         
-        Vector3D direction = (destination - model.getWorldPosition());
+        dest = destination;
+        Vector3D direction = (dest - model.getWorldPosition());
         direction.Normalize();
         model.setTargetFacing(direction);
         
@@ -933,9 +1157,16 @@ public class StatePoint : State
     
     public override bool invalid(Drone model)
     {
-        return moveStyle != MoveStyle.FORWARD || Math.Abs(model.currentFacingError()) < 1;
+        return moveStyle != MoveStyle.FORWARD || Math.Abs(model.currentFacingError()) < 1 || getLateralDirection(model).Length() < 15D;
     }
     public override String exitState(Drone model){ return "move"; }
+    
+    protected virtual Vector3D getLateralDirection(Drone model)
+    {
+        Vector3D world = model.toLocal(dest - model.getWorldPosition());
+        world.Y = 0;
+        return model.toWorld(world);
+    }
 }
 
 public class StateMove : State
@@ -943,10 +1174,13 @@ public class StateMove : State
     protected Vector3D dest;
     private double cutoffDist;
     protected String exitCause = "";
+    protected bool allowAltitude = true;
     
-    public StateMove() : this(20D, new Color(0, 255, 255)){ }
-    public StateMove(Color colorIn) : this(20D, colorIn){ }
-    protected StateMove(double distIn, Color colorIn) : base(colorIn, new Controls[]{Controls.THRUSTERS})
+    public StateMove() : this(200D, new Color(0, 255, 255), new Controls[]{Controls.THRUSTERS}){ }
+    public StateMove(double distIn, Color colorIn) : this(distIn, colorIn, new Controls[]{Controls.THRUSTERS}){ }
+    public StateMove(Color colorIn) : this(20D, colorIn, new Controls[]{Controls.THRUSTERS}){ }
+    public StateMove(Color colorIn, Controls[] controlsIn) : this(20D, colorIn, controlsIn){ }
+    protected StateMove(double distIn, Color colorIn, Controls[] controlsIn) : base(colorIn, controlsIn)
     {
         cutoffDist = distIn;
     }
@@ -956,17 +1190,36 @@ public class StateMove : State
         dest = destination;
         Vector3D direction = getLateralDirection(model);
         double speedLimit = getSpeedLimit(destination, model);
+        double altitude = model.getAltitude();
+        int altTarget = currentTargetAltitude();
         
         Vector3D velocities = model.toLocal(model.getShipVelocities());
         echo("   > Distance: "+Math.Round(direction.Length(), 2));
-        echo("   > Max Velocity Per Axis: "+Math.Round(speedLimit, 2)+"m/s");
-        echo("   > Velocities: "+String.Join(", ", Math.Abs(Math.Round(velocities.X,2)), Math.Abs(Math.Round(velocities.Y,2)), Math.Abs(Math.Round(velocities.Z,2))));
-        echo("     > "+Math.Round(velocities.Length(), 2)+"m/s");
+        if(!ignoreAltitude && allowAltitude)
+            echo("   > Altitude: "+Math.Round(altitude, 0)+" / ["+altTarget+"-"+(altTarget+altitudeRange)+"]");
+        echo("   > Max Velocity: "+Math.Round(speedLimit, 2)+"m/s");
+        echo("   > Current: "+Math.Round(velocities.Length(), 2)+"m/s");
         
-        if(direction.Length() > cutoffDist)
+        if(direction.Length() > cutoffDist && velocities.Length() < speedLimit)
         {
             direction.Normalize();
-            model.setTargetVelocity(new Vector3D(speedLimit * direction.X, speedLimit * direction.Y, speedLimit * direction.Z));
+            
+            if(allowAltitude && !ignoreAltitude)
+            {
+                altTarget += (altitudeRange / 2);
+                double altError = altTarget - altitude;
+                
+                if(Math.Abs(altError) > (altitudeRange / 8))
+                {
+                    Vector3D gravity = model.getGravity();
+                    gravity.Normalize();
+                    gravity = Vector3D.Multiply(gravity, -1);
+                    
+                    direction += Vector3D.Multiply(gravity, Math.Sign(altError) * 0.1D);
+                }
+            }
+            
+            model.setTargetVelocity(Vector3D.Multiply(direction, speedLimit));
         }
         else
             model.clearTargetVelocity();
@@ -974,19 +1227,24 @@ public class StateMove : State
     
     public override bool invalid(Drone model)
     {
-        if(lowAltitudeWarning(10))
+        if(model.getTotalChargePercent() < 0.2F)
         {
-            exitCause = "rise";
+            exitCause = "lowBat";
+            return true;
+        }
+        else if(altitudeWarning())
+        {
+            exitCause = "altitude";
+            return true;
+        }
+        else if(model.getShipVelocities().Length() < 1 && getLateralDirection(model).Length() <= cutoffDist)
+        {
+            exitCause = "lateral";
             return true;
         }
         else if(moveStyle == MoveStyle.FORWARD && Math.Abs(model.getFacingError(destination - model.getWorldPosition())) > 5D)
         {
             exitCause = "point";
-            return true;
-        }
-        else if(getLateralDirection(model).Length() <= cutoffDist)
-        {
-            exitCause = "lateral";
             return true;
         }
         
@@ -1014,28 +1272,45 @@ public class StateMove : State
 
 public class StateMoveLateral : StateMove
 {
-    public StateMoveLateral() : base(0.5D, new Color(0, 255, 0)){ }
+    private bool incOnExit = false;
+    public StateMoveLateral() : base(0.5D, new Color(0, 255, 0)){ allowAltitude = false; }
     
     protected override double getSpeedLimit(Vector3D destination, Drone model){ return Math.Max(getLateralDirection(model).Length() / 10, 0.05D); }
+    
+    public override void onExit(Drone model)
+    {
+        if(incOnExit)
+        {
+            incOnExit = false;
+            incrementWaypoint();
+        }
+    }
     
     public override bool invalid(Drone model)
     {
         double direction = getLateralDirection(model).Length();
-        if(lowAltitudeWarning(10))
+        if(altitudeWarning())
         {
-            exitCause = "rise";
+            exitCause = "altitude";
             return true;
         }
-        else if(direction > 20)
+        else if(direction > 200)
         {
             exitCause = "move";
             return true;
         }
-        else if(direction < 0.5D)
-        {
-            exitCause = "land";
-            return true;
-        }
+        else if(model.getShipVelocities().Length() < 1)
+            if(direction < 10 && !isFinalDestination())
+            {
+                incOnExit = true;
+                exitCause = "point";
+                return true;
+            }
+            else if(direction < 0.5D)
+            {
+                exitCause = "land";
+                return true;
+            }
         
         return false;
     }
@@ -1046,22 +1321,30 @@ public class StateLand : StateMove
     private bool prevCollision = false;
     
     public StateLand() : this(new Color(0, 255, 255)){ }
-    protected StateLand(Color colorIn) : base(colorIn){ }
+    protected StateLand(Color colorIn) : base(colorIn, new Controls[]{Controls.THRUSTERS, Controls.ANTENNA}){ }
     
     public override void tick(Vector3D destination, Drone model, Action<string> echo)
     {
         dest = destination;
         Vector3D deviation = getLateralDirection(model);
         double distVert = (destination - model.getWorldPosition()).Length() - deviation.Length();
-        echo("   > Altitude: "+Math.Round(distVert,2));
+        int altitude = (int)model.getAltitude();
+        echo("   > Altitude: "+altitude);
+        echo("   > Distance: "+Math.Round(distVert,2));
         echo("   > Deviation: "+Math.Round(deviation.Length(),2));
+        model.setBroadcast("Landing "+(int)distVert+"m");
         
-        if(distVert > 1 && !model.isConnected())
+        if((ignoreAltitude ? distVert > 0 : altitude > 2) && !model.isConnected())
         {
             Vector3D direction = (dest - model.getWorldPosition());
             direction.Normalize();
             
-            model.setTargetVelocity(Vector3D.Multiply(direction, model.collisionAlarm() ? Math.Min(2D, distVert) : 15D));
+            direction = model.toLocal(direction);
+            direction.Y = Math.Min(-1, direction.Y);
+            direction = model.toWorld(direction);
+            
+            double speed = Math.Min(distVert, altitude);
+            model.setTargetVelocity(Vector3D.Multiply(direction, model.collisionAlarm() ? Math.Min(2D, speed) : 15D));
         }
         else
             model.clearTargetVelocity();
@@ -1072,13 +1355,13 @@ public class StateLand : StateMove
     
     public override bool invalid(Drone model)
     {
-        Vector3D deviation = getLateralDirection(model);
-        if((!ignoreAltitude && model.getAltitude() < 5) || model.isConnected())
+        bool landed = ignoreAltitude ? (dest - model.getWorldPosition()).Length() == 0 : model.getAltitude() <= 2;
+        if(landed || model.isConnected())
         {
             exitCause = "stop";
             return true;
         }
-        else if(deviation.Length() > 1 && prevCollision != model.collisionAlarm())
+        else if(getLateralDirection(model).Length() > 5 && prevCollision != model.collisionAlarm())
         {
             exitCause = "land2";
             return true;
@@ -1112,4 +1395,30 @@ public class StateLandPrecise : StateLand
     
     public override bool invalid(Drone model){ return getLateralDirection(model).Length() < 0.5D; }
     public override String exitState(Drone model){ return "land"; }
+}
+
+public class StateLowPower : State
+{
+    public StateLowPower() : base(new Color(0,0,0), new Controls[]{Controls.THRUSTERS, Controls.ANTENNA}){ }
+    
+    public override void tick(Vector3D destination, Drone model, Action<string> echo)
+    {
+        int altitude = (int)model.getAltitude();
+        model.setBroadcast("EMERGENCY LANDING");
+        if(altitude > 3)
+        {
+            Vector3D gravity = model.getGravity();
+            gravity.Normalize();
+            model.setTargetVelocity(Vector3D.Multiply(gravity, Math.Max(1, altitude / 15)));
+        }
+        else
+        {
+            model.clearTargetVelocity();
+            if(model.getShipVelocities().Length() < 1)
+                model.doCharging();
+        }
+    }
+    
+    public override bool invalid(Drone model){ return model.getTotalChargePercent() > 0.5F; }
+    public override String exitState(Drone model){ return "altitude"; }
 }
