@@ -3,6 +3,7 @@ const string version = "2.8";
 const String spinning = "-\\|/";
 const String config_default = 
     "[setup]\n;Prefix of this drone\nname_prefix=HMC\n;Name of the forward indicator light\nindicator_light=Interior Light\n\n[travel]\n;Style of travel (either forward or lateral)\nmove_style=forward\n;Top speed for this drone\nmax_speed=50\n;Yaw offset for this drone to face a given direction\nyaw_offset=0\n\n[altitude]\n;Whether this drone should ignore cockpit altitude readings\nignore_altitude=false\n;Minimum altitude this drone should maintain during travel\nminimum_altitude=50\nmaximum_altitude=75";
+const int max_scan = 10000;
 
 // Drone model
 public static Drone model;
@@ -103,7 +104,7 @@ public Program()
 
 public void Save()
 {
-    Storage = String.Join(";", state, direction == TravelDirection.START ? 0 : 1, currentWaypoint);
+    Storage = String.Join(";", state, direction == TravelDirection.START ? 0 : 1, currentWaypoint, targetAltitude);
 }
 
 public void Main(string argument, UpdateType updateSource)
@@ -209,11 +210,12 @@ public void loadStorage(String memory)
     
     // Operating data
     String[] data = lines[0].Split(';');
-    if(data.Length == 3)
+    if(data.Length == 4)
     {
         setState(data[0]);
         direction = int.Parse(data[1]) > 0 ? TravelDirection.END : TravelDirection.START;
         currentWaypoint = int.Parse(data[2]);
+        targetAltitude = int.Parse(data[3]);
     }
     if(--entries <= 0) return;
 }
@@ -694,7 +696,7 @@ public class Drone
         }
         
         camera.EnableRaycast = true;
-        int scanDist = Math.Max(1000, minAltitude);
+        int scanDist = Math.Max(max_scan, minAltitude);
         if(camera.CanScan(scanDist))
         {
             MyDetectedEntityInfo scan = camera.Raycast(scanDist);
