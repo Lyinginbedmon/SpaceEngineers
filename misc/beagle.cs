@@ -14,6 +14,15 @@ private static Operation currentOp = Operation.NONE;
 public static bool ccOn = false;
 public static int ccSpeed = 50;
 
+private static List<IMyTextPanel> allScreens = new List<IMyTextPanel>();
+private List<IMyTextPanel> screensStatus = new List<IMyTextPanel>();
+private List<IMyTextPanel> screensInventory = new List<IMyTextPanel>();
+public enum ScreenType
+{
+    INV,
+    STATUS
+}
+
 public enum Orientation
 {
     MANUAL,
@@ -59,6 +68,20 @@ public Program()
     
     model = new Shuttle(Me, this);
     loadStorage(Storage);
+    
+    List<IMyTextPanel> LCDs = new List<IMyTextPanel>();
+    GridTerminalSystem.GetBlocksOfType<IMyTextPanel>(LCDs);
+    foreach(var LCD in LCDs)
+        if(LCD.CubeGrid == Me.CubeGrid)
+        {
+            LCD.CustomName = namePrefix + " Info Screen "+allScreens.Count;
+            string data = LCD.CustomData.ToLower();
+            if(data == "inv")
+                screensInventory.Add(LCD);
+            else if(data == "status")
+                screensStatus.Add(LCD);
+            allScreens.Add(LCD);
+        }
 }
 
 public void Save()
@@ -71,7 +94,6 @@ public void Main(string argument, UpdateType updateSource)
 {
     hasClearedScreen = false;
     ++ticksRunning;
-    echoToScreens("Beagle OS Version "+version+" "+getSpinning());
     
     if(argument.Length > 0)
         parseArg(argument);
@@ -85,32 +107,26 @@ public void Main(string argument, UpdateType updateSource)
         return;
     }
     
-    echoToScreens("Orientation: "+Enum.GetName(typeof(Orientation), currentOri));
-    echoToScreens("Operation: "+Enum.GetName(typeof(Operation), currentOp));
+    handleScreensStatus();
+    handleScreensInventory();
     
-    if(currentOp != Operation.NONE)
+    if(!noOperation())
     {
         ShipOperation op = OPERATION_MAP.ContainsKey(currentOp) ? OPERATION_MAP[currentOp] : null;
-        op.tick(model, echoToScreens);
+        op.tick(model, echoToStatus);
         if(op.invalid(model))
             setOperation(Operation.NONE);
+    }
+    else if(ccOn)
+    {
+        Vector3D forward = new Vector3D(0, 0, -1);
+        forward = Vector3D.Multiply(model.toWorld(forward), ccSpeed);
+        model.setTargetVelocity(forward);
     }
     if(currentOri != Orientation.MANUAL && model.getGravity().Length() == 0)
         setOrientation(Orientation.MANUAL);
     
-    echoToScreens("");
-    echoToScreens("Velocity: "+Math.Round(model.getShipVelocities().Length(), 2)+"m/s");
-    echoToScreens("Power: "+Math.Round(model.getTotalChargePercent()*100, 2)+"%");
-    echoToScreens("");
-    echoToScreens("Atmosphere: "+Math.Round(model.getAtmosphere(), 2)+"atm");
     double grav = model.getGravity().Length();
-    echoToScreens("Gravity: "+Math.Round(grav / 10, 2)+"g");
-    if(grav > 0)
-    {
-        double alt = Math.Round(model.getAltitude(), 2);
-        echoToScreens("Altitude: "+(alt > 1000 ? ">1km" : alt+"m"));
-    }
-    
     if(currentOp != Operation.ELAND && grav > 0)
         if(model.getAvailableChargePercent() < 0.2F) // TODO Include Hydrogen tank status check
             setOperation(Operation.ELAND);
@@ -130,10 +146,10 @@ public void parseArg(String argument)
     else if(val.StartsWith("set_op="))
         setOperation(operationFromName(val.Split('=')[1].ToLower()));
     else if(val == "cc_off")
-        ccOn = false;
-    else if(val.StartsWith("cc_on"))
+        enableCruiseControl(false);
+    else if(val.StartsWith("cc_on") && noOperation())
     {
-        ccOn = true;
+        enableCruiseControl(true);
         if(val.StartsWith("cc_on="))
             ccSpeed = (int)clamp(int.Parse(val.Split('=')[1]), 20, 140);
     }
@@ -159,13 +175,54 @@ public void loadStorage(String memory)
         currentOri = orientationFromName(data[1]);
     }
     if(--entries <= 0) return;
+    
+    data = lines[1].Split(';');
+    if(data.Length == 2)
+    {
+        ccOn = int.Parse(data[0]) > 0;
+        ccSpeed = int.Parse(data[1]);
+    }
+    if(--entries <= 0) return;
 }
 
-public void echoToScreens(string text)
+public void handleScreensStatus()
+{
+    hasClearedScreen = false;
+    echoToStatus("Beagle OS Version "+version+" "+getSpinning());
+    echoToStatus("Orientation: "+Enum.GetName(typeof(Orientation), currentOri));
+    echoToStatus("Operation: "+Enum.GetName(typeof(Operation), currentOp));
+    echoToStatus("");
+    if(ccOn)
+        echoToStatus("Cruise Control Active: "+ccSpeed+"m/s");
+    echoToStatus("Velocity: "+Math.Round(model.getShipVelocities().Length(), 2)+"m/s");
+    echoToStatus("");
+    echoToStatus("Atmosphere: "+Math.Round(model.getAtmosphere(), 2)+"atm");
+    double grav = model.getGravity().Length();
+    echoToStatus("Gravity: "+Math.Round(grav / 10, 2)+"g");
+    if(grav > 0)
+    {
+        double alt = Math.Round(model.getAltitude(), 2);
+        echoToStatus("Altitude: "+(alt > 1000 ? ">1km" : alt+"m"));
+    }
+	if(!noOperation())
+		echoToStatus("Operation Log:");
+}
+
+public void handleScreensInventory()
+{
+    hasClearedScreen = false;
+    echoToInventory("Power: "+Math.Round(model.getTotalChargePercent()*100, 2)+"%");
+}
+
+public void echoToScreens(string text) { echoToScreens(text, allScreens); }
+public void echoToStatus(string text) { echoToScreens(text, screensStatus); }
+public void echoToInventory(string text) { echoToScreens(text, screensInventory); }
+private void echoToScreens(string text, List<IMyTextPanel> screensIn)
 {
     Echo(text);
-    //if(screen != null && screen.IsFunctional && screen.Enabled)
-    //    screen.WriteText((hasClearedScreen ? "\n" : "") + text, hasClearedScreen);
+    foreach(var screen in screensIn)
+        if(screen != null && screen.IsFunctional && screen.Enabled)
+            screen.WriteText((hasClearedScreen ? "\n" : "") + text, hasClearedScreen);
     hasClearedScreen = true;
 }
 
@@ -173,14 +230,15 @@ private void reset()
 {
     setOperation(Operation.NONE);
     setOrientation(Orientation.MANUAL);
-    ccOn = false;
+    enableCruiseControl(false);
     Save();
 }
 
 public static Operation getOperation(){ return currentOp; }
+public static bool noOperation(){ return currentOp == Operation.NONE; }
 public static void setOperation(Operation opIn)
 {
-    if(currentOp != Operation.NONE)
+    if(!noOperation())
     {
         ShipOperation current = OPERATION_MAP.ContainsKey(currentOp) ? OPERATION_MAP[currentOp] : null;
         if(current != null)
@@ -194,8 +252,8 @@ public static void setOperation(Operation opIn)
         next.enter(model);
     
     currentOp = opIn;
-    if(currentOp != Operation.NONE)
-        ccOn = false;
+    if(!noOperation())
+        enableCruiseControl(false);
 }
 
 public static Orientation getOrientation(){ return currentOri; }
@@ -206,6 +264,13 @@ public static void setOrientation(Orientation oriIn)
             return;
     
     currentOri = oriIn;
+}
+
+public static void enableCruiseControl(bool valIn)
+{
+    if(ccOn && !valIn)
+        model.clearTargetVelocity();
+    ccOn = valIn;
 }
 
 // #### UTILITY FUNCTIONS ####
@@ -235,7 +300,6 @@ public static float clamp(float val, float min, float max)
 public class Shuttle
 {
     // Remote control
-    private IMyRemoteControl remote;
     private IMyShipController mainControl;
     // Antenna
     private IMyRadioAntenna antenna;
@@ -264,14 +328,14 @@ public class Shuttle
     
     public Shuttle(IMyProgrammableBlock me, MyGridProgram program)
     {
-        List<IMyRemoteControl> remotes = new List<IMyRemoteControl>();
-        program.GridTerminalSystem.GetBlocksOfType<IMyRemoteControl>(remotes);
-        foreach(var controller in remotes)
-            if(controller.CubeGrid == me.CubeGrid && controller.IsFunctional)
+        List<IMyShipController> cockpits = new List<IMyShipController>();
+        program.GridTerminalSystem.GetBlocksOfType<IMyShipController>(cockpits);
+        foreach(var cock in cockpits)
+            if(cock.CubeGrid == me.CubeGrid && cock.IsFunctional && cock.IsMainCockpit)
             {
-                controller.CustomName = namePrefix+" Remote";
-                controller.DampenersOverride = true;
-                remote = controller;
+                cock.CustomName = namePrefix + " Cockpit";
+                cock.DampenersOverride = true;
+                mainControl = cock;
                 break;
             }
         
@@ -300,12 +364,12 @@ public class Shuttle
         
         foreach(var direction in Base6Directions.EnumDirections)
             thrustMap[direction] = new List<IMyThrust>();
-        if(remote != null)
+        if(mainControl != null)
         {
             List<IMyShipConnector> connect = new List<IMyShipConnector>();
             program.GridTerminalSystem.GetBlocksOfType<IMyShipConnector>(connect);
             foreach(var connector in connect)
-                if(connector.CubeGrid == me.CubeGrid && getLocalFacing(connector, remote) == directionMatrix.Up)
+                if(connector.CubeGrid == me.CubeGrid && getLocalFacing(connector, mainControl) == directionMatrix.Up)
                 {
                     connector.CustomName = namePrefix+" Connector "+connectors.Count;
                     connector.Enabled = true;
@@ -324,7 +388,7 @@ public class Shuttle
                     thruster.ShowInTerminal = false;
                     thruster.ShowInToolbarConfig = false;
                     
-                    Vector3 thrustVec = getLocalFacing(thruster, remote);
+                    Vector3 thrustVec = getLocalFacing(thruster, mainControl);
                     Base6Directions.Direction localFace = Base6Directions.Direction.Forward;
                     if(thrustVec == directionMatrix.Forward)
                         localFace = Base6Directions.Direction.Forward;
@@ -354,7 +418,7 @@ public class Shuttle
             List<IMyCameraBlock> cameras = new List<IMyCameraBlock>();
             program.GridTerminalSystem.GetBlocksOfType<IMyCameraBlock>(cameras);
             foreach(var cam in cameras)
-                if(cam.CubeGrid == me.CubeGrid && getLocalFacing(cam, remote) == directionMatrix.Up)
+                if(cam.CubeGrid == me.CubeGrid && getLocalFacing(cam, mainControl) == directionMatrix.Up)
                 {
                     cam.CustomName = namePrefix+" Altitude Sensor";
                     cam.Enabled = true;
@@ -385,7 +449,7 @@ public class Shuttle
                 sense.CustomName = namePrefix+" Collision Sensor";
                 sense.Enabled = true;
                 
-                Vector3 faceVec = getLocalFacing(sense, remote);
+                Vector3 faceVec = getLocalFacing(sense, mainControl);
                 sense.BackExtend = faceVec.Y <= 0 ? 20 : 0;
                 sense.FrontExtend = faceVec.Y >= 0 ? 20 : 0;
                 sense.RightExtend = sense.LeftExtend = sense.TopExtend = sense.BottomExtend = int.MaxValue;
@@ -430,13 +494,13 @@ public class Shuttle
         updateLevelling();
         
         // Total mass of ship (kg)
-        double mass = remote.CalculateShipMass().TotalMass;
+        double mass = mainControl.CalculateShipMass().TotalMass;
         
         // Downward gravity relative to ship (m/s)
         double grav = toLocal(getGravity()).Length();
         
         // Velocity relative to ship (m/s)
-        Vector3D velocity = toLocal(remote.GetShipVelocities().LinearVelocity);
+        Vector3D velocity = toLocal(mainControl.GetShipVelocities().LinearVelocity);
         
         // Target velocity relative to ship (m/s)
         Vector3D targetVel = toLocal(targetVelocity);
@@ -450,7 +514,7 @@ public class Shuttle
     public bool diagnostic(Action<string> echo)
     {
         bool pass = true;
-        if(remote == null || !remote.IsFunctional)
+        if(mainControl == null || !mainControl.IsFunctional)
         {
             echo(" X Missing remote control");
             pass = false;
@@ -533,10 +597,10 @@ public class Shuttle
         return pass;
     }
     
-    public Vector3D getGravity(){ return remote == null ? new Vector3D(0, 0, 0) : remote.GetNaturalGravity(); }
+    public Vector3D getGravity(){ return mainControl == null ? new Vector3D(0, 0, 0) : mainControl.GetNaturalGravity(); }
     
-    public Vector3D toLocal(Vector3D vectorIn){ return Vector3D.TransformNormal(vectorIn, MatrixD.Transpose(remote.WorldMatrix)); }
-    public Vector3D toWorld(Vector3D vectorIn){ return Vector3D.TransformNormal(vectorIn, remote.WorldMatrix); }
+    public Vector3D toLocal(Vector3D vectorIn){ return Vector3D.TransformNormal(vectorIn, MatrixD.Transpose(mainControl.WorldMatrix)); }
+    public Vector3D toWorld(Vector3D vectorIn){ return Vector3D.TransformNormal(vectorIn, mainControl.WorldMatrix); }
     
     public void setBroadcast(String messageIn)
     {
@@ -582,8 +646,8 @@ public class Shuttle
     {
         double altSea = 0D;
         double altVox = 0D;
-        remote.TryGetPlanetElevation(MyPlanetElevation.Sealevel, out altSea);
-        remote.TryGetPlanetElevation(MyPlanetElevation.Surface, out altVox);
+        mainControl.TryGetPlanetElevation(MyPlanetElevation.Sealevel, out altSea);
+        mainControl.TryGetPlanetElevation(MyPlanetElevation.Surface, out altVox);
         return Math.Min(altSea, altVox);
     }
     
@@ -660,13 +724,13 @@ public class Shuttle
     private void updateOrientationRef()
     {
         Matrix shipOrientation;
-        remote.Orientation.GetMatrix(out shipOrientation);
+        mainControl.Orientation.GetMatrix(out shipOrientation);
         
         var quatPitch = Quaternion.CreateFromAxisAngle(shipOrientation.Left, 0F);
         var quatRoll = Quaternion.CreateFromAxisAngle(shipOrientation.Backward, 0F);
         
         downRef = Vector3D.Transform(getOrientation() == Orientation.AWAY ? shipOrientation.Backward : shipOrientation.Down, quatPitch * quatRoll);
-        gravTarget = remote.GetNaturalGravity();
+        gravTarget = mainControl.GetNaturalGravity();
     }
 
     // Resets gyroscopes to prevent further rotation after state change
@@ -738,8 +802,8 @@ public class Shuttle
             }
     }
     
-    public Vector3D getShipVelocities(){ return remote.GetShipVelocities().LinearVelocity; }
-    public Vector3D getShipRotations(){ return remote.GetShipVelocities().AngularVelocity; }
+    public Vector3D getShipVelocities(){ return mainControl.GetShipVelocities().LinearVelocity; }
+    public Vector3D getShipRotations(){ return mainControl.GetShipVelocities().AngularVelocity; }
     
     private void registerThruster(IMyThrust thruster, Base6Directions.Direction direction)
     {
@@ -942,7 +1006,7 @@ public abstract class ShipOperation
 
 public class OperationLaunch : ShipOperation
 {
-    public OperationLaunch() : base(new Controls[]{Controls.THRUSTERS}){ }
+    public OperationLaunch() : base(new Controls[]{Controls.THRUSTERS, Controls.CONNECTOR}){ }
     
     public override void enter(Shuttle model)
     {
