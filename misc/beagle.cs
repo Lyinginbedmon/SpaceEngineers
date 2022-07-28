@@ -8,20 +8,18 @@ public static Shuttle model;
 readonly static Matrix directionMatrix = new Matrix(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
 private static Dictionary<Operation, ShipOperation> OPERATION_MAP = new Dictionary<Operation, ShipOperation>();
 
+// System values
 const String namePrefix = "BGL";
 private static Orientation currentOri = Orientation.MANUAL;
 private static Operation currentOp = Operation.NONE;
 public static bool ccOn = false;
 public static int ccSpeed = 50;
+private static List<IMyGasTank> tanksH = new List<IMyGasTank>();
+private static List<IMyGasTank> tanksO2 = new List<IMyGasTank>();
 
 private static List<IMyTextPanel> allScreens = new List<IMyTextPanel>();
 private List<IMyTextPanel> screensStatus = new List<IMyTextPanel>();
 private List<IMyTextPanel> screensInventory = new List<IMyTextPanel>();
-public enum ScreenType
-{
-    INV,
-    STATUS
-}
 
 public enum Orientation
 {
@@ -82,6 +80,26 @@ public Program()
                 screensStatus.Add(LCD);
             allScreens.Add(LCD);
         }
+    
+    List<IMyGasTank> tanks = new List<IMyGasTank>();
+    GridTerminalSystem.GetBlocksOfType<IMyGasTank>(tanks);
+    foreach(var tank in tanks)
+        if(tank.CubeGrid == Me.CubeGrid)
+        {
+            String type = tank.BlockDefinition.ToString().ToLower();
+            tank.ShowInTerminal = false;
+            tank.ShowInToolbarConfig = false;
+            if(type.Contains("hydrogen"))
+            {
+                tank.CustomName = namePrefix + " Hydrogen Tank "+tanksH.Count;
+                tanksH.Add(tank);
+            }
+            else
+            {
+                tank.CustomName = namePrefix + " Oxygen Tank "+tanksO2.Count;
+                tanksO2.Add(tank);
+            }
+        }
 }
 
 public void Save()
@@ -128,7 +146,7 @@ public void Main(string argument, UpdateType updateSource)
     
     double grav = model.getGravity().Length();
     if(currentOp != Operation.ELAND && grav > 0)
-        if(model.getAvailableChargePercent() < 0.2F) // TODO Include Hydrogen tank status check
+        if(model.getAvailableChargePercent() < 0.2F && getTotalGasPercent(tanksH) == 0F)
             setOperation(Operation.ELAND);
     
     Save();
@@ -204,14 +222,30 @@ public void handleScreensStatus()
         double alt = Math.Round(model.getAltitude(), 2);
         echoToStatus("Altitude: "+(alt > 1000 ? ">1km" : alt+"m"));
     }
-	if(!noOperation())
-		echoToStatus("Operation Log:");
+    if(!noOperation())
+        echoToStatus("Operation Log:");
 }
 
 public void handleScreensInventory()
 {
     hasClearedScreen = false;
-    echoToInventory("Power: "+Math.Round(model.getTotalChargePercent()*100, 2)+"%");
+    float pow = model.getTotalChargePercent();
+    echoToInventory(Math.Round(pow*100, 2)+"% Pow");
+    echoToInventory((pow < 0.2F && ticksRunning%2 == 0) ? "" : percentToBar(pow));
+    
+    float hyd = getTotalGasPercent(tanksH);
+    float capacity = 0F;
+    foreach(var tank in tanksH)
+        capacity += tank.Capacity;
+    echoToInventory(Math.Round(capacity * hyd, 0)+"L Hyd");
+    echoToInventory((hyd < 0.2F && ticksRunning%2 == 0) ? "" : percentToBar(hyd));
+    
+    float oxy = getTotalGasPercent(tanksO2);
+    capacity = 0F;
+    foreach(var tank in tanksO2)
+        capacity += tank.Capacity;
+    echoToInventory(Math.Round(capacity * oxy, 0)+"L Oxy");
+    echoToInventory((oxy < 0.2F && ticksRunning%2 == 0) ? "" : percentToBar(oxy));
 }
 
 public void echoToScreens(string text) { echoToScreens(text, allScreens); }
@@ -290,11 +324,42 @@ public static Vector3 getLocalFacing(IMyCubeBlock block, IMyShipController remot
     return Vector3.Transform(fromThrusterToGrid.Backward, fromGridToReference);
 }
 
+public float getTotalGasPercent(List<IMyGasTank> tanks)
+{
+    double total = 0D;
+    double max = 0D;
+    foreach(var tank in tanks)
+    {
+        total += tank.FilledRatio * tank.Capacity;
+        max += tank.Capacity;
+    }
+    return (float)(total / max);
+}
+
 public static float clamp(float val, float min, float max)
 {
     float minVal = Math.Min(min, max);
     float maxVal = Math.Max(min, max);
     return Math.Max(minVal, Math.Min(maxVal, val));
+}
+
+public string percentToBar(float percentage, float divisor)
+{
+    percentage = clamp(percentage, 0F, 1F);
+    String bar = "[";
+    float val = 0F;
+    while(val < 1F)
+    {
+        bar += val <= percentage ? "|" : "'";
+        val += divisor;
+    }
+    bar += "]";
+    return bar;
+}
+
+public string percentToBar(float percentage)
+{
+    return percentToBar(percentage, 0.0125F);
 }
 
 public class Shuttle
@@ -437,7 +502,8 @@ public class Shuttle
                 chute.Enabled = true;
                 chute.ShowInTerminal = false;
                 chute.ShowInToolbarConfig = false;
-                
+                chute.AutoDeployHeight = 500F;
+				chute.CloseDoor();
                 parachutes.Add(chute);
             }
         
@@ -652,6 +718,17 @@ public class Shuttle
     }
     
     public bool collisionAlarm(){ return sensor != null && sensor.Enabled && sensor.IsActive; }
+    
+    public void setChuteDeploy(bool on)
+    {
+        foreach(var parachute in parachutes)
+            if(parachute != null)
+			{
+                parachute.AutoDeploy = on;
+				if(!on)
+					parachute.CloseDoor();
+			}
+    }
     
     public void setConnector(bool on)
     {
@@ -991,6 +1068,7 @@ public abstract class ShipOperation
                 case Controls.CONNECTOR: model.setConnector(true); break;
                 case Controls.BATTERIES: model.resetBatteries(); break;
                 case Controls.ANTENNA: model.setBroadcast(null); break;
+                case Controls.PARACHUTES: model.setChuteDeploy(false); break;
             }
     }
     
@@ -1000,7 +1078,8 @@ public abstract class ShipOperation
         GYROS,
         CONNECTOR,
         BATTERIES,
-        ANTENNA
+        ANTENNA,
+        PARACHUTES,
     }
 }
 
@@ -1083,13 +1162,16 @@ public class OperationLand : ShipOperation
 
 public class OperationLowPower : OperationLand
 {
-    public OperationLowPower() : base(new Controls[]{Controls.THRUSTERS, Controls.ANTENNA}){ }
+    public OperationLowPower() : base(new Controls[]{Controls.THRUSTERS, Controls.ANTENNA, Controls.PARACHUTES}){ }
     
     public override void tick(Shuttle model, Action<string> echo)
     {
         base.tick(model, echo);
         int altitude = (int)model.getAltitude();
         model.setBroadcast("EMERGENCY LANDING");
+        if(altitude <= 500F && model.getTotalChargePercent() <= 0.05F)
+            model.setChuteDeploy(true);
+        
         if(altitude <= 2)
         {
             model.clearTargetVelocity();
