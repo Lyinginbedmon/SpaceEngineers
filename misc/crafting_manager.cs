@@ -105,6 +105,7 @@ public void loadConfig(String customData)
     showUnmanaged = config.Get("general", "ShowUnmanaged").ToBoolean(true);
     
     // Identify all managed item groups
+    library.Clear();
     List<string> sections = new List<string>();
     config.GetSections(sections);
     foreach(string section in sections)
@@ -445,7 +446,6 @@ public static MyDefinitionId createRequest(MyItemType item)
     return MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + name);
 }
 
-// Converts a formatted item string into a corresponding MyItemType, if possible
 public static Nullable<MyItemType> stringToItem(string nameIn)
 {
     String[] elements = nameIn.Split(':');
