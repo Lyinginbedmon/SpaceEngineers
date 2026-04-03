@@ -1,30 +1,45 @@
-// == Creation Crafting Management OS ==
+// == Creation Crafting & Management OS ==
 
 // HOW TO USE
-// Compile once to populate the programmable block's CustomData
+// The default config is automatically loaded into the programmable block's CustomData if it is blank when compiled
+// The program will automatically shut off in this event to give you a moment to set it up first
 // Adjust the config however you like
 // * Prefix - Used to indicate blocks being manipulated by this system
-// * CraftRate - How frequently the system updates its crafting requests (higher = less frequently)
+// * CraftRate - How frequently the system updates its crafting requests (higher = less frequently), set to 0 to disable autocrafting entirely
 // * StorageFlag - The value in a block's CustomData that flags it as monitored storage
 // * CrafterFlag - The value in an assembler's CustomData that flags it as useable crafting
-// * Thresholds - Self-explanatory, how much of each item to maintain in storage via crafting. Set a given threshold to 0 to have crafting ignore it.
+// * DisplayUnmanaged - If set to 1, the system will still display items whose thresholds are set to 0
+// * Item groups - All sections after [general] are item groups and their corresponding thresholds, refer to the default config for formatting
+// Once the config has been adjusted, recompile the program. A spinning icon should appear in the console to indicate activity
+//
+// SETTING UP THE NETWORK
 // Go to each cargo container you want to be included, and put the StorageFlag value in its CustomData (main_hold by default)
-// Go to each assembler you want to be included, and put the CraftFlag value in its CustomData (auto_assembler by default)
+// Go to each assembler you want to be included, and put the CrafterFlag value in its CustomData (auto_assembler by default)
 // Then recompile the programmable block to apply the updates
-// For display screens, set their CustomData to comp_0, comp_1, proto, or resources as appropriate and recompile
+// For display screens, set their CustomData to any configured item group name (case sensitive)
+// 
+// CONSOLE COMMANDS
+// * reset_config - Reverts the block's CustomData to the default config setup, does NOT reload the config
+// * reload_config - Loads the config from the block's CustomData without recompiling
+// * scan_assemblers - Rescans the local grid for any nominated assemblers
+// * scan_displays - Rescans the local grid for any nominated display screens
+// * scan_storage - Rescans the local grid for any cargo containers or other inventories of note
+// * stop - Immediately halts the program, recompile to restart it
+// * stop_crafting - Disables autocrafting
 
-const String version = "1.0";
+const String version = "3.0";
 const int INT_MAX = 2147483647;
 const String spinning = "-\\|/";
 const String config_default = 
-    "[general]\nPrefix=CRT\nCraftRate=10\nStorageFlag=main_hold\nCrafterFlag=auto_assembler\n\n[component_a_thresholds]\nSteelPlate=100000\nInteriorPlate=100000\nConstruction=50000\nSmallTube=10000\nLargeTube=10000\nGirder=10000\n\n[component_b_thresholds]\nMetalGrid=1000\nSolarCell=1000\nDisplay=1000\nPowerCell=1000\nMotor=1000\nComputer=1000\n\n[prototech_thresholds]\nPrototechCapacitor=100\nPrototechCircuitry=100\nPrototechCoolingUnit=100\nPrototechFrame=20\nPrototechMachinery=100\nPrototechPanel=200\nPrototechPropulsionUnit=100\nPrototechScrap=0";
+    "[general]\nPrefix=CRT\nCraftRate=0\nStorageFlag=main_hold\nCrafterFlag=auto_assembler\nDisplayUnmanaged=1\n\n[Components A]\ncomponent:SteelPlate=100000\ncomponent:InteriorPlate=100000\ncomponent:Construction=50000\ncomponent:SmallTube=10000\ncomponent:LargeTube=10000\ncomponent:Girder=10000\n\n[Components B]\ncomponent:MetalGrid=1000\ncomponent:SolarCell=1000\ncomponent:Display=1000\ncomponent:PowerCell=1000\ncomponent:Motor=1000\ncomponent:Computer=1000\n\n[Prototech Components]\ncomponent:PrototechCapacitor=100\ncomponent:PrototechCircuitry=100\ncomponent:PrototechCoolingUnit=100\ncomponent:PrototechFrame=20\ncomponent:PrototechMachinery=100\ncomponent:PrototechPanel=200\ncomponent:PrototechPropulsionUnit=100\ncomponent:PrototechScrap=0";
 
 String prefix;
-String holdFlag = "main_hold";
-String craftFlag = "auto_assembler";
+String storageFlag;
+String craftFlag;
 int craftingRate;
+bool showUnmanaged;
 // All LCD panels
-Dictionary<ScreenType, List<IMyTextPanel>> screenMap = new Dictionary<ScreenType, List<IMyTextPanel>>();
+Dictionary<string, List<IMyTextPanel>> screenMap = new Dictionary<string, List<IMyTextPanel>>();
 // All cargo containers
 List<IMyTerminalBlock> containers = new List<IMyTerminalBlock>();
 // All assemblers
@@ -33,61 +48,8 @@ List<IMyAssembler> assemblers = new List<IMyAssembler>();
 bool hasClearedScreen = false;
 int ticksRunning = 0;
 
-public enum ScreenType
-{
-    COMP_0,
-    COMP_1,
-    PROTO,
-    RESOURCES,
-    BLANK
-}
-public static ScreenType[] screenTypes = new ScreenType[]{ScreenType.COMP_0, ScreenType.COMP_1, ScreenType.PROTO, ScreenType.RESOURCES};
-
-// List of all items recognised by this system
-private static List<MyItemType> monitoredComponents = new List<MyItemType>();
-
-private static MyItemType[] resources = new MyItemType[]
-    {
-        MyItemType.MakeIngot("Iron"),
-        MyItemType.MakeIngot("Silicon"),
-        MyItemType.MakeIngot("Nickel"),
-        MyItemType.MakeIngot("Cobalt"),
-        MyItemType.MakeIngot("Silver"),
-        MyItemType.MakeIngot("Platinum"),
-        MyItemType.MakeIngot("Magnesium"),
-        MyItemType.MakeOre("Ice"),
-        MyItemType.MakeIngot("Uranium")
-    };
-private static MyItemType[] components_0 = new MyItemType[]
-    {
-        MyItemType.MakeComponent("SteelPlate"),
-        MyItemType.MakeComponent("InteriorPlate"),
-        MyItemType.MakeComponent("Construction"),
-        MyItemType.MakeComponent("SmallTube"),
-        MyItemType.MakeComponent("LargeTube"),
-        MyItemType.MakeComponent("Girder")
-    };
-private static MyItemType[] components_1 = new MyItemType[]
-    {
-        MyItemType.MakeComponent("MetalGrid"),
-        MyItemType.MakeComponent("SolarCell"),
-        MyItemType.MakeComponent("Display"),
-        MyItemType.MakeComponent("PowerCell"),
-        MyItemType.MakeComponent("Motor"),
-        MyItemType.MakeComponent("Computer")
-    };
-private static MyItemType[] components_p = new MyItemType[]
-    {
-        MyItemType.MakeComponent("PrototechCapacitor"),
-        MyItemType.MakeComponent("PrototechCircuitry"),
-        MyItemType.MakeComponent("PrototechCoolingUnit"),
-        MyItemType.MakeComponent("PrototechFrame"),
-        MyItemType.MakeComponent("PrototechMachinery"),
-        MyItemType.MakeComponent("PrototechPanel"),
-        MyItemType.MakeComponent("PrototechPropulsionUnit"),
-        MyItemType.MakeComponent("PrototechScrap")
-    };
-
+// Library of item groups and their corresponding thresholds
+private Dictionary<string, Dictionary<MyItemType, int>> library = new Dictionary<string, Dictionary<MyItemType, int>>();
 // Dictionary of monitored components to their configured crafting thresholds
 private static Dictionary<MyItemType,int> componentThresholds = new Dictionary<MyItemType, int>();
 // Dictionary of monitored components to how many are needed to meet thresholds
@@ -98,47 +60,16 @@ private static MyIni config = new MyIni();
 public Program()
 {
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
-    
+    start();
+}
+
+public void start()
+{
     // Define component thresholds
     loadConfig(Me.CustomData);
     
-    Me.CustomName = prefix+" System Control";
-    
-    // Assess monitored components
-    foreach(MyItemType item in components_0)
-        monitoredComponents.Add(item);
-    foreach(MyItemType item in components_1)
-        monitoredComponents.Add(item);
-    foreach(MyItemType item in components_p)
-        monitoredComponents.Add(item);
-    foreach(MyItemType item in resources)
-        monitoredComponents.Add(item);
-    
     // Identify display screens
-    foreach(var type in screenTypes)
-        screenMap[type] = new List<IMyTextPanel>();
-    List<IMyTextPanel> panels = new List<IMyTextPanel>();
-    GridTerminalSystem.GetBlocksOfType<IMyTextPanel>(panels);
-    foreach(var panel in panels)
-        if(panel.CubeGrid == Me.CubeGrid)
-        {
-            panel.ShowInTerminal = false;
-            panel.ShowInToolbarConfig = false;
-            
-            ScreenType type = getScreenFromString(panel.CustomData);
-            if(type != ScreenType.BLANK)
-            {
-                panel.ContentType = ContentType.TEXT_AND_IMAGE;
-                switch(type)
-                {
-                    case ScreenType.COMP_0:    panel.CustomName = prefix+" Comp. A Inv Screen "+screenMap[type].Count; break;
-                    case ScreenType.COMP_1:    panel.CustomName = prefix+" Comp. B Inv Screen "+screenMap[type].Count; break;
-                    case ScreenType.PROTO:    panel.CustomName = prefix+" Prototech Inv Screen "+screenMap[type].Count; break;
-                    case ScreenType.RESOURCES:    panel.CustomName = prefix+" Resources Screen "+screenMap[type].Count; break;
-                }
-                screenMap[type].Add(panel);
-            }
-        }
+    collectScreens();
     
     // Identify monitored cargo inventories
     collectContainers();
@@ -149,10 +80,12 @@ public Program()
 
 public void loadConfig(String customData)
 {
+    // If no config is present, load the default
     if(customData.Length == 0)
     {
+        Runtime.UpdateFrequency = UpdateFrequency.Once;
         Me.CustomData = config_default;
-        customData = Me.CustomData;
+        throw new Exception("Blank config detected, resetting");
     }
     
     MyIniParseResult result;
@@ -162,71 +95,101 @@ public void loadConfig(String customData)
         throw new Exception(result.ToString());
     }
     
+    Me.CustomName = prefix+" System Control";
+    
+    // Identify system variables
     prefix = config.Get("general", "Prefix").ToString("CRT");
     craftingRate = config.Get("general", "CraftRate").ToInt32(10);
-    holdFlag = config.Get("general", "StorageFlag").ToString("main_hold").ToLower();
+    storageFlag = config.Get("general", "StorageFlag").ToString("main_hold").ToLower();
     craftFlag = config.Get("general", "CrafterFlag").ToString("auto_assembler").ToLower();
+    showUnmanaged = config.Get("general", "ShowUnmanaged").ToBoolean(true);
     
-    foreach(MyItemType item in components_0)
-        componentThresholds[item] = config.Get("component_a_thresholds", item.SubtypeId).ToInt32(0);
-    
-    foreach(MyItemType item in components_1)
-        componentThresholds[item] = config.Get("component_b_thresholds", item.SubtypeId).ToInt32(0);
-    
-    foreach(MyItemType item in components_p)
-        componentThresholds[item] = config.Get("prototech_thresholds", item.SubtypeId).ToInt32(0);
+    // Identify all managed item groups
+    List<string> sections = new List<string>();
+    config.GetSections(sections);
+    foreach(string section in sections)
+    {
+        // Skip [general] so we don't set our own mandatory section as a monitored grouping
+        if(section == "general")
+            continue;
+        
+        // Identify each item and its corresponding threshold in this grouping
+        Dictionary<MyItemType,int> group = new Dictionary<MyItemType,int>();
+        List<MyIniKey> keys = new List<MyIniKey>();
+        config.GetKeys(section, keys);
+        foreach(MyIniKey key in keys)
+        {
+            string entry = key.Name;
+            Nullable<MyItemType> type = stringToItem(entry);
+            if(type.HasValue)
+                group[type.Value] = config.Get(section, entry).ToInt32(0);
+        }
+        
+        library[section] = group;
+    }
 }
 
 public void Main(string argument, UpdateType updateSource)
 {
     ++ticksRunning;
     componentRequests.Clear();
-    handleInvScreens(screenMap[ScreenType.COMP_0], components_0);
-    handleInvScreens(screenMap[ScreenType.COMP_1], components_1);
-    handleInvScreens(screenMap[ScreenType.PROTO], components_p);
-    handleResScreens();
     
-    if(ticksRunning%craftingRate == 0)
+    // Display basic information
+    Echo("Creation Crafting & Management "+version+" "+getSpinning());
+    Echo("> "+library.Count+" configured item groups");
+    Echo("> "+containers.Count+" monitored inventories");
+    Echo("> "+assemblers.Count+" accessed assemblers");
+    
+    // Update display screens
+    foreach(string set in screenMap.Keys)
+        handleInvScreens(screenMap[set], library[set], set);
+    
+    // Update autocrafting handling if enabled
+    if(craftingRate <= 0)
+        Echo("Autocrafting protocol disabled");
+    else if(assemblers.Count == 0)
+        Echo("No assemblers nominated for autocrafting usage");
+    else if(ticksRunning%craftingRate == 0)
         updateAutoCrafting();
+    else
+        Echo("Autocrafting protocol disabled");
+    
+    if(argument.Length > 0)
+    {
+        string command = argument.ToLower();
+        if(command == "reset_config")
+            Me.CustomData = config_default;
+        else if(command == "reload_config")
+            start();
+        else if(command == "scan_storage")
+            collectContainers();
+        else if(command == "scan_assemblers")
+            collectCrafters();
+        else if(command == "scan_displays")
+            collectScreens();
+        else if(command == "stop")
+        {
+            Runtime.UpdateFrequency = UpdateFrequency.Once;
+            throw new Exception("Script stopped by command");
+        }
+        else if(command == "stop_crafting")
+            craftingRate = 0;
+    }
 }
 
 // #### MANAGEMENT FUNCTIONS ####
 
-public void handleResScreens()
-{
-    List<IMyTextPanel> screens = screenMap[ScreenType.RESOURCES];
-    MyItemType[] listedItems = resources;
-    hasClearedScreen = false;
-    echoToScreens(screens, "Available Resources:");
-    Dictionary<MyItemType, int> itemMap = new Dictionary<MyItemType, int>();
-    int longestName = 0;
-    foreach(var item in listedItems)
-    {
-        itemMap[item] = getTotalOfItem(item);
-        longestName = Math.Max(longestName, item.SubtypeId.Length);
-    }
-    foreach(var item in listedItems)
-    {
-        String name = item.SubtypeId;
-        String entry = " > "+name+": ";
-        if(name.Length < 30)
-            entry = entry.PadRight(30 - name.Length);
-        entry += abbreviateValue(itemMap[item]);
-        echoToScreens(screens, entry);
-    }
-}
-
-public void handleInvScreens(List<IMyTextPanel> screens, MyItemType[] listedItems)
+public void handleInvScreens(List<IMyTextPanel> screens, Dictionary<MyItemType,int> itemGroup, string groupName)
 {
     hasClearedScreen = false;
-    echoToScreens(screens, "Available Components:");
+    echoToScreens(screens, "= "+groupName+":");
     String entry = "".PadRight(20);
-    foreach(var item in listedItems)
+    foreach(MyItemType item in itemGroup.Keys)
     {
         echoToScreens(screens, " > "+item.SubtypeId + ":");
         int tally = getTotalOfItem(item);
-        int threshold = componentThresholds[item];
-        if(threshold <= 0)
+        int threshold = itemGroup[item];
+        if(threshold <= 0 && !showUnmanaged)
             echoToScreens(screens, entry+abbreviateValue(tally));
         else
         {
@@ -279,38 +242,11 @@ public char getSpinning()
     return spinning[this.ticksRunning % spinning.Length];
 }
 
-// Reduces a numerical value to a truncated version, such as 1k or 3m
-public string abbreviateValue(int value)
-{
-    if(value == 0F)
-        return "-";
-    else if(value >= 1000000)
-        return (value / 1000000) + "m";
-    else if(value >= 1000)
-        return (value / 1000) + "k";
-    else
-        return "" + value;
-}
-
-public ScreenType getScreenFromString(String value)
-{
-    foreach(var type in screenTypes)
-        if(Enum.GetName(typeof(ScreenType), type).ToLower() == value.ToLower())
-            return type;
-    return ScreenType.BLANK;
-}
-
 // Adds the given string to all given screens
 public void echoToScreens(List<IMyTextPanel> screens, string text)
 {
     addStringToDisplays(screens, text, hasClearedScreen);
     hasClearedScreen = true;
-}
-
-public void addStringToDisplays(List<IMyTextPanel> displays, string text, bool append)
-{
-    foreach(var screen in displays)
-        screen.WriteText((append ? "\n" : "") + text, append);
 }
 
 // Tallies the given item across all monitored inventories
@@ -324,46 +260,6 @@ public int getTotalOfItem(MyItemType item)
     foreach(var box in assemblers)
         tally += getItemAmount(box.InputInventory, item) + getItemAmount(box.OutputInventory, item);
     return tally;
-}
-
-// Manually compares items by ID, because Prototech Scrap gets overlooked otherwise for some reason
-public int getItemAmount(IMyInventory inv, MyItemType item)
-{
-    int tally = 0;
-    int index = 0;
-    while(index < inv.ItemCount)
-    {
-        MyInventoryItem? slot = inv.GetItemAt(index);
-        MyInventoryItem contents = slot.Value;
-        
-        if(contents.Type.SubtypeId.Contains(item.SubtypeId))
-            tally += contents.Amount.ToIntSafe();
-        index++;
-    }
-    return tally;
-}
-
-// Returns true if the given request is of the given item
-public bool isRequestOfItem(MyProductionItem request, MyItemType item)
-{
-    return request.BlueprintId.ToString().Contains(item.SubtypeId);
-}
-
-// Creates a new production request for the given item
-public MyDefinitionId createRequest(MyItemType item)
-{
-    string name = item.SubtypeId;
-    if(name == "Explosives")
-        name = "ExplosiveComponent";
-    else if(name == "Girder")
-        name = "GirderComponent";
-    else if(name == "Computer")
-        name = "ComputerComponent";
-    else if(name == "Construction")
-        name = "ConstructionComponent";
-    else if(name == "Motor")
-        name = "MotorComponent";
-    return MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + name);
 }
 
 // Provides the given item to the nominated assembler with the shortest queue
@@ -397,9 +293,30 @@ public void pushRequest(MyItemType item, decimal count)
         recipient.AddQueueItem(request, count);
 }
 
+// Collects all LCD panels with an item group name as their CustomData
+public void collectScreens()
+{
+    screenMap.Clear();
+    foreach(string type in library.Keys)
+        screenMap[type] = new List<IMyTextPanel>();
+    List<IMyTextPanel> panels = new List<IMyTextPanel>();
+    GridTerminalSystem.GetBlocksOfType<IMyTextPanel>(panels);
+    foreach(var panel in panels)
+        if(panel.CubeGrid == Me.CubeGrid && library.ContainsKey(panel.CustomData))
+        {
+            string type = panel.CustomData;
+            panel.CustomName = prefix+" "+type+" Screen "+screenMap[type].Count;
+            panel.ContentType = ContentType.TEXT_AND_IMAGE;
+            panel.ShowInTerminal = false;
+            panel.ShowInToolbarConfig = false;
+            screenMap[type].Add(panel);
+        }
+}
+
 // Collects all nominated cargo containers, as well as all cargo terminals and connectors, on this grid
 public void collectContainers()
 {
+    containers.Clear();
     List<IMyCargoContainer> cargo = new List<IMyCargoContainer>();
     GridTerminalSystem.GetBlocksOfType<IMyCargoContainer>(cargo);
     int boxes = 0;
@@ -407,10 +324,10 @@ public void collectContainers()
         if(box.CubeGrid == Me.CubeGrid)
         {
             string type = box.BlockDefinition.SubtypeName;
-            if(box.CustomData.ToLower() == holdFlag)
+            if(box.CustomData.ToLower() == storageFlag)
             {
                 if(type.Contains("Container"))
-                    box.CustomName = prefix+" Cargo Hold "+(++boxes);
+                    renameContainer(box, prefix, ++boxes);
                 containers.Add(box);
             }
             else if(type.Contains("CargoTerminal"))
@@ -427,9 +344,24 @@ public void collectContainers()
             containers.Add(box);
 }
 
+public static void renameContainer(IMyCargoContainer box, string prefix, int index)
+{
+    string type = box.BlockDefinition.SubtypeName;
+    bool isLarge = false;
+    if(type.Contains(' '))
+        isLarge = type.Contains("Large");
+    else
+    {
+        string id = type.Replace("LargeBlock","").Replace("SmallBlock","");
+        isLarge = id.Contains("Large");
+    }
+    box.CustomName = prefix+" "+(isLarge ? "Large" : "Small")+" Cargo Hold "+index;
+}
+
 // Collects all nominated assemblers on this grid
 public void collectCrafters()
 {
+    assemblers.Clear();
     List<IMyAssembler> crafters = new List<IMyAssembler>();
     GridTerminalSystem.GetBlocksOfType<IMyAssembler>(crafters);
     int boxes = 0;
@@ -451,4 +383,86 @@ public void collectCrafters()
             ass.ShowInToolbarConfig = false;
             assemblers.Add(ass);
         }
+}
+
+// Reduces a numerical value to a truncated version, such as 1k or 3m
+public static string abbreviateValue(int value)
+{
+    if(value == 0F)
+        return "-";
+    else if(value >= 1000000)
+        return (value / 1000000) + "m";
+    else if(value >= 1000)
+        return (value / 1000) + "k";
+    else
+        return "" + value;
+}
+
+// Adds the given text to every LCD in the list, appending or clearing as appropriate
+public static void addStringToDisplays(List<IMyTextPanel> displays, string text, bool append)
+{
+    foreach(var screen in displays)
+        screen.WriteText((append ? "\n" : "") + text, append);
+}
+
+// Manually compares items by ID, because Prototech Scrap gets overlooked otherwise for some reason
+public static int getItemAmount(IMyInventory inv, MyItemType item)
+{
+    int tally = 0;
+    int index = 0;
+    while(index < inv.ItemCount)
+    {
+        MyInventoryItem? slot = inv.GetItemAt(index);
+        MyInventoryItem contents = slot.Value;
+        
+        if(contents.Type.SubtypeId.Contains(item.SubtypeId))
+            tally += contents.Amount.ToIntSafe();
+        index++;
+    }
+    return tally;
+}
+
+// Returns true if the given request is of the given item
+public static bool isRequestOfItem(MyProductionItem request, MyItemType item)
+{
+    return request.BlueprintId.ToString().Contains(item.SubtypeId);
+}
+
+// Creates a new production request for the given item
+public static MyDefinitionId createRequest(MyItemType item)
+{
+    string name = item.SubtypeId;
+    if(name == "Explosives")
+        name = "ExplosiveComponent";
+    else if(name == "Girder")
+        name = "GirderComponent";
+    else if(name == "Computer")
+        name = "ComputerComponent";
+    else if(name == "Construction")
+        name = "ConstructionComponent";
+    else if(name == "Motor")
+        name = "MotorComponent";
+    return MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + name);
+}
+
+// Converts a formatted item string into a corresponding MyItemType, if possible
+public static Nullable<MyItemType> stringToItem(string nameIn)
+{
+    String[] elements = nameIn.Split(':');
+    if(elements.Length != 2)
+        throw new Exception("Item not specified properly: "+nameIn+", must be in format ore:Iron or component:Construction etc");
+    String type = elements[0].ToLower();
+    String name = elements[1];
+    if(type.Equals("ore"))
+        return MyItemType.MakeOre(name);
+    else if(type.Equals("ingot"))
+        return MyItemType.MakeIngot(name);
+    else if(type == "component")
+        return MyItemType.MakeComponent(name);
+    else if(type == "tool")
+        return MyItemType.MakeTool(name);
+    else if(type == "ammo")
+        return MyItemType.MakeAmmo(name);
+    
+    throw new Exception("Item type unrecognised: "+type+" in "+nameIn);
 }
