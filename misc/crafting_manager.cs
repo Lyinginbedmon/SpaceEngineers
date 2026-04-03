@@ -146,14 +146,14 @@ public void Main(string argument, UpdateType updateSource)
         handleInvScreens(screenMap[set], library[set], set);
     
     // Update autocrafting handling if enabled
-    if(craftingRate <= 0)
+    if(containers.Count == 0)
+        Echo("No inventories to monitor");
+    else if(craftingRate <= 0)
         Echo("Autocrafting protocol disabled");
     else if(assemblers.Count == 0)
         Echo("No assemblers nominated for autocrafting usage");
     else if(ticksRunning%craftingRate == 0)
         updateAutoCrafting();
-    else
-        Echo("Autocrafting protocol disabled");
     
     if(argument.Length > 0)
     {
