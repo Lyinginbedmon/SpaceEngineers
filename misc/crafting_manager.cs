@@ -190,7 +190,7 @@ public void handleInvScreens(List<IMyTextPanel> screens, Dictionary<MyItemType,i
         echoToScreens(screens, " > "+item.SubtypeId + ":");
         int tally = getTotalOfItem(item);
         int threshold = itemGroup[item];
-        if(threshold <= 0 && !showUnmanaged)
+        if(threshold <= 0 && showUnmanaged)
             echoToScreens(screens, entry+abbreviateValue(tally));
         else
         {
