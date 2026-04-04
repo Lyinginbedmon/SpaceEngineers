@@ -345,23 +345,18 @@ public void collectContainers()
             containers.Add(box);
 }
 
+// Renames monitored cargo containers whilst retaining useful identifying information
 public static void renameContainer(IMyCargoContainer box, string prefix, int index)
 {
     string type = box.BlockDefinition.SubtypeName;
+    string size = "Small";
     if(type.Contains("Medium"))
-    {
-        box.CustomName = prefix+" Medium Cargo Hold "+index;
-        return;
-    }
-    bool isLarge = false;
-    if(type.Contains(' '))
-        isLarge = type.Contains("Large");
-    else
-    {
-        string id = type.Replace("LargeBlock","").Replace("SmallBlock","");
-        isLarge = id.Contains("Large");
-    }
-    box.CustomName = prefix+" "+(isLarge ? "Large" : "Small")+" Cargo Hold "+index;
+        size = "Medium";
+    else if(type.Contains("Modular"))
+        size = "Modular";
+    else if(type.Replace("LargeBlock","").Contains("Large"))
+        size = "Large";
+    box.CustomName = prefix+" "+size+" Cargo Hold "+index;
 }
 
 // Collects all nominated assemblers on this grid
