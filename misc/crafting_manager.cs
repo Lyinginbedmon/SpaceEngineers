@@ -12,6 +12,14 @@
 // * Item groups - All sections after [general] are item groups and their corresponding thresholds, refer to the default config for formatting
 // Once the config has been adjusted, recompile the program. A spinning icon should appear in the console to indicate activity
 //
+// ITEM FORMATTING
+// Items need to be defined in the config in a particular way to properly match game values
+// To that end, they are referred to with a lowercase type then their proper name, separated by a semicolon (:)
+// The supported types are: ore, ingot, component, tool, and ammo
+// It's important to note that whilst MOST items have a proper name reflecting their translated English name without spaces, not all do!
+// For instance, Construction Components are simply Construction in their proper name.
+// In most cases, when an item's translated English name includes its type, the type is removed. Such as ore:Iron for Iron Ore.
+//
 // SETTING UP THE NETWORK
 // Go to each cargo container you want to be included, and put the StorageFlag value in its CustomData (main_hold by default)
 // Go to each assembler you want to be included, and put the CrafterFlag value in its CustomData (auto_assembler by default)
