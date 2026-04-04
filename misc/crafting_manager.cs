@@ -348,6 +348,11 @@ public void collectContainers()
 public static void renameContainer(IMyCargoContainer box, string prefix, int index)
 {
     string type = box.BlockDefinition.SubtypeName;
+    if(type.Contains("Medium"))
+    {
+        box.CustomName = prefix+" Medium Cargo Hold "+index;
+        return;
+    }
     bool isLarge = false;
     if(type.Contains(' '))
         isLarge = type.Contains("Large");
