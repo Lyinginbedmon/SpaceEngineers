@@ -6,7 +6,8 @@
 // Adjust the config however you like
 // * Prefix - Used to indicate blocks being manipulated by this system
 // * CraftRate - How frequently the system updates its crafting requests (higher = less frequently), set to 0 to disable autocrafting entirely
-// * StorageFlag - The value in a block's CustomData that flags it as monitored storage
+// * CraftStyle - How the system manages the assemblers. Stacked = assembler with shortest queue, Balanced = distributed across all assemblers
+// * StorageFlag - The value in a block's CustomData that flags it as monitored storage. Blocks can have multiple flags
 // * CrafterFlag - The value in an assembler's CustomData that flags it as useable crafting
 // * DisplayUnmanaged - If set to 1, the system will still display items whose thresholds are set to 0
 // * Item groups - All sections after [general] are item groups and their corresponding thresholds, refer to the default config for formatting
@@ -35,11 +36,10 @@
 // * stop - Immediately halts the program, recompile to restart it
 // * stop_crafting - Disables autocrafting
 
-const String version = "3.8";
+const String version = "4.0";
 const int INT_MAX = 2147483647;
 const String spinning = "-\\|/";
-const String config_default = 
-    "[general]\nPrefix=CRT\nCraftRate=0\nCraftStyle=stacked\nStorageFlag=main_hold\nCrafterFlag=auto_assembler\nDisplayUnmanaged=1\n\n[Components A]\ncomponent:SteelPlate=100000\ncomponent:InteriorPlate=100000\ncomponent:Construction=50000\ncomponent:SmallTube=10000\ncomponent:LargeTube=10000\ncomponent:Girder=10000\n\n[Components B]\ncomponent:MetalGrid=1000\ncomponent:SolarCell=1000\ncomponent:Display=1000\ncomponent:PowerCell=1000\ncomponent:Motor=1000\ncomponent:Computer=1000\n\n[Prototech Components]\ncomponent:PrototechCapacitor=100\ncomponent:PrototechCircuitry=100\ncomponent:PrototechCoolingUnit=100\ncomponent:PrototechFrame=20\ncomponent:PrototechMachinery=100\ncomponent:PrototechPanel=200\ncomponent:PrototechPropulsionUnit=100\ncomponent:PrototechScrap=0";
+String config_default = "";
 
 String prefix;
 String storageFlag;
@@ -53,6 +53,16 @@ Dictionary<string, List<IMyTextPanel>> screenMap = new Dictionary<string, List<I
 List<IMyTerminalBlock> containers = new List<IMyTerminalBlock>();
 // All assemblers
 List<IMyAssembler> assemblers = new List<IMyAssembler>();
+
+// Definitions of all supported types of cargo container
+public enum ContainerType
+{
+    SMALL,
+    MEDIUM,
+    MODULAR,
+    LARGE
+}
+public static ContainerType[] containerTypes = new ContainerType[]{ContainerType.SMALL, ContainerType.MEDIUM, ContainerType.MODULAR, ContainerType.LARGE};
 
 // Definitions for different assembler management approaches
 public enum CraftStyle
@@ -78,6 +88,8 @@ private static MyIni config = new MyIni();
 public Program()
 {
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
+    createDefaultConfig();
+    
     start();
 }
 
@@ -94,6 +106,48 @@ public void start()
     
     // Identify nominated assemblers
     collectCrafters();
+}
+
+// Initialises the default config settings
+private void createDefaultConfig()
+{
+    MyIni defConfig = new MyIni();
+    
+    defConfig.AddSection("general");
+    defConfig.Set("general", "Prefix","CRT");
+    defConfig.Set("general", "CraftRate", 0);
+    defConfig.Set("general", "CraftStyle", "stacked");
+    defConfig.Set("general", "StorageFlag", "main_hold");
+    defConfig.Set("general", "CrafterFlag", "auto_assembler");
+    defConfig.Set("general", "DisplayUnmanaged", true);
+    
+    defConfig.AddSection("Components A");
+    defConfig.Set("Components A", "component:SteelPlate", 100000);
+    defConfig.Set("Components A", "component:InteriorPlate", 100000);
+    defConfig.Set("Components A", "component:Construction", 50000); 
+    defConfig.Set("Components A", "component:SmallTube", 10000); 
+    defConfig.Set("Components A", "component:LargeTube", 10000); 
+    defConfig.Set("Components A", "component:Girder", 10000); 
+    
+    defConfig.AddSection("Components B");
+    defConfig.Set("Components B", "component:MetalGrid", 1000);
+    defConfig.Set("Components B", "component:SolarCell", 1000);
+    defConfig.Set("Components B", "component:Display", 1000);
+    defConfig.Set("Components B", "component:PowerCell", 1000);
+    defConfig.Set("Components B", "component:Motor", 1000);
+    defConfig.Set("Components B", "component:Computer", 1000);
+    
+    defConfig.AddSection("Prototech Components");
+    defConfig.Set("Prototech Components", "component:PrototechCapacitor", 100);
+    defConfig.Set("Prototech Components", "component:PrototechCircuitry", 100);
+    defConfig.Set("Prototech Components", "component:PrototechCoolingUnit", 100);
+    defConfig.Set("Prototech Components", "component:PrototechFrame", 20);
+    defConfig.Set("Prototech Components", "component:PrototechMachinery", 100);
+    defConfig.Set("Prototech Components", "component:PrototechPanel", 200);
+    defConfig.Set("Prototech Components", "component:PrototechPropulsionUnit", 100);
+    defConfig.Set("Prototech Components", "component:PrototechScrap", 0);
+    
+    config_default = defConfig.ToString();
 }
 
 public void loadConfig(String customData)
@@ -157,6 +211,8 @@ public void Main(string argument, UpdateType updateSource)
     // Display basic information
     Echo("Creation Crafting & Management "+version+" "+getSpinning());
     Echo("> "+library.Count+" configured item groups");
+    foreach(string group in library.Keys)
+        Echo("    "+group);
     Echo("> "+containers.Count+" monitored inventories");
     Echo("   Storage Flag: "+storageFlag);
     Echo("> "+assemblers.Count+" managed assemblers");
@@ -168,14 +224,14 @@ public void Main(string argument, UpdateType updateSource)
     
     // Update autocrafting handling if enabled
     if(containers.Count == 0)
-        Echo("No inventories to monitor");
+        Echo("   No inventories to monitor");
     else if(craftingRate <= 0)
-        Echo("Autocrafting protocol disabled");
+        Echo("   Autocrafting protocol disabled");
     else if(assemblers.Count == 0)
-        Echo("No assemblers nominated for autocrafting usage");
+        Echo("   No assemblers nominated for autocrafting usage");
     else
     {
-        Echo("Crafting style: "+Enum.GetName(typeof(CraftStyle), craftingStyle));
+        Echo("   Crafting style: "+Enum.GetName(typeof(CraftStyle), craftingStyle));
         if(ticksRunning%craftingRate == 0)
             updateAutoCrafting();
         foreach(string line in latestReport)
@@ -390,43 +446,40 @@ public void collectContainers()
     containers.Clear();
     List<IMyCargoContainer> cargo = new List<IMyCargoContainer>();
     GridTerminalSystem.GetBlocksOfType<IMyCargoContainer>(cargo);
-    int boxes = 0;
+    Dictionary<ContainerType, List<IMyCargoContainer>> renamedMap = new Dictionary<ContainerType, List<IMyCargoContainer>>();
     foreach(var box in cargo)
         if(box.CubeGrid == Me.CubeGrid)
         {
             string type = box.BlockDefinition.SubtypeName;
             if(isBlockFlagged(box, storageFlag))
             {
-                if(type.Contains("Container"))
-                    renameContainer(box, prefix, ++boxes);
+                // If this system has primary control of this container, rename it accordingly
+                if(isBlockFlaggedPrimary(box, storageFlag) && type.Contains("Container"))
+                {
+                    ContainerType boxType = containerToType(box);
+                    List<IMyCargoContainer> set = renamedMap.ContainsKey(boxType) ? renamedMap[boxType] : new List<IMyCargoContainer>();
+                    set.Add(box);
+                    renamedMap[boxType] = set;
+                }
                 containers.Add(box);
             }
+            // Add all grid-connected cargo terminals to the monitoring list as writ
             else if(type.Contains("CargoTerminal"))
                 containers.Add(box);
             
+            // I honestly don't know why cargo containers even have these settings
             box.ShowInTerminal = false;
             box.ShowInToolbarConfig = false;
         }
     
+    renameContainers(renamedMap, prefix);
+    
+    // Add all grid-connected connectors to the monitoring list as writ
     List<IMyShipConnector> connectors = new List<IMyShipConnector>();
     GridTerminalSystem.GetBlocksOfType<IMyShipConnector>(connectors);
     foreach(var box in connectors)
         if(box.CubeGrid == Me.CubeGrid)
             containers.Add(box);
-}
-
-// Renames monitored cargo containers whilst retaining useful identifying information
-public static void renameContainer(IMyCargoContainer box, string prefix, int index)
-{
-    string type = box.BlockDefinition.SubtypeName;
-    string size = "Small";
-    if(type.Contains("Medium"))
-        size = "Medium";
-    else if(type.Contains("Modular"))
-        size = "Modular";
-    else if(type.Replace("LargeBlock","").Contains("Large"))
-        size = "Large";
-    box.CustomName = prefix+" "+size+" Cargo Hold "+index;
 }
 
 // Collects all nominated assemblers on this grid
@@ -441,19 +494,62 @@ public void collectCrafters()
         {
             string type = "Assembler";
             string subtype = ass.BlockDefinition.SubtypeName;
-            if(subtype.Contains("Prototech"))
-                type = "Prototech Assembler";
-            else if(subtype.Contains("Basic"))
-                type = "Basic Assembler";
-            // Never use survival kits for autocrafting
-            else if(subtype.Contains("Survival"))
-                continue;
             
-            ass.CustomName = prefix+" Managed "+type+" "+(++boxes);
+            // Never use survival kits for autocrafting
+            if(subtype.Contains("Survival"))
+                continue;
+            // If this system has primary control of this assembler, rename it accordingly
+            else if(isBlockFlaggedPrimary(ass, craftFlag))
+            {
+                if(subtype.Contains("Prototech"))
+                    type = "Prototech Assembler";
+                else if(subtype.Contains("Basic"))
+                    type = "Basic Assembler";
+                ass.CustomName = prefix+" Managed "+type+" "+(++boxes);
+            }
+            
             ass.ShowInTerminal = false;
             ass.ShowInToolbarConfig = false;
             assemblers.Add(ass);
         }
+}
+
+// Assigns a unique name to all monitored containers
+public static void renameContainers(Dictionary<ContainerType, List<IMyCargoContainer>> map, string prefix)
+{
+    foreach(ContainerType type in map.Keys)
+    {
+        List<IMyCargoContainer> set = map[type];
+        string size = Enum.GetName(typeof(ContainerType), type).ToLower();
+        size = Char.ToUpperInvariant(size[0]) + size.Substring(1,size.Length-1);
+        
+        int index = 0;
+        foreach(IMyCargoContainer box in set)
+            box.CustomName = prefix+" "+size+" Cargo Hold "+(++index);
+    }
+}
+
+// Converts the given cargo container to its corresponding ContainerType
+public static ContainerType containerToType(IMyCargoContainer box)
+{
+    string type = box.BlockDefinition.SubtypeName;
+    if(type.Contains("Medium"))
+        return ContainerType.MEDIUM;
+    else if(type.Contains("Modular"))
+        return ContainerType.MODULAR;
+    else if(type.Replace("LargeBlock","").Contains("Large"))
+        return ContainerType.LARGE;
+    else
+        return ContainerType.SMALL;
+}
+
+// Converts the given string to a CraftStyle, or STACKED if none matches
+public static CraftStyle stringToStyle(string nameIn)
+{
+    foreach(CraftStyle style in craftStyles)
+        if(nameIn.ToLower() == Enum.GetName(typeof(CraftStyle), style).ToLower())
+            return style;
+    return CraftStyle.STACKED;
 }
 
 // Reduces a numerical value to a truncated version, such as 1k or 3m
@@ -538,21 +634,28 @@ public static Nullable<MyItemType> stringToItem(string nameIn)
     throw new Exception("Item type unrecognised: "+type+" in "+nameIn);
 }
 
-// Converts the given string to a CraftStyle, or STACKED if none matches
-public static CraftStyle stringToStyle(string nameIn)
-{
-    foreach(CraftStyle style in craftStyles)
-        if(nameIn.ToLower() == Enum.GetName(typeof(CraftStyle), style).ToLower())
-            return style;
-    return CraftStyle.STACKED;
-}
-
 // Returns true if any line of the given block's CustomData matches the given flag string
 public static bool isBlockFlagged(IMyTerminalBlock block, string flagIn)
 {
-    string[] flags = block.CustomData.Split('\n');
-    foreach(string f in flags)
-        if(f.ToLower() == flagIn.ToLower())
+    string flags = block.CustomData.ToLower();
+    string target = flagIn.ToLower();
+    
+    // Single line
+    if(flags == target)
+        return true;
+    
+    // Multi-line
+    foreach(string f in flags.Split('\n'))
+        if(f == target)
             return true;
+    
     return false;
+}
+
+// Returns true if this block has the given flag AND it is the first/only flag it has
+public static bool isBlockFlaggedPrimary(IMyTerminalBlock block, string flagIn)
+{
+    string flags = block.CustomData.ToLower();
+    string target = flagIn.ToLower();
+    return flags == target || flags.Split('\n')[0] == target;
 }
