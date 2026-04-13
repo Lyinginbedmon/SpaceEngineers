@@ -6,6 +6,7 @@
 // Adjust the config however you like
 // * Prefix - Used to indicate blocks being manipulated by this system
 // * CraftRate - How frequently the system updates its crafting requests (higher = less frequently), set to 0 to disable autocrafting entirely
+// * CraftStyle - How the system should make use of the assemblers. Either STACKED for first-empty-queue or BALANCED for distributed queuing
 // * StorageFlag - The value in a block's CustomData that flags it as monitored storage
 // * CrafterFlag - The value in an assembler's CustomData that flags it as useable crafting
 // * DisplayUnmanaged - If set to 1, the system will still display items whose thresholds are set to 0
