@@ -6,7 +6,6 @@
 // Adjust the config however you like
 // * Prefix - Used to indicate blocks being manipulated by this system
 // * CraftRate - How frequently the system updates its crafting requests (higher = less frequently), set to 0 to disable autocrafting entirely
-// * CraftStyle - How the system should make use of the assemblers. Either STACKED for first-empty-queue or BALANCED for distributed queuing
 // * StorageFlag - The value in a block's CustomData that flags it as monitored storage
 // * CrafterFlag - The value in an assembler's CustomData that flags it as useable crafting
 // * DisplayUnmanaged - If set to 1, the system will still display items whose thresholds are set to 0
@@ -159,7 +158,9 @@ public void Main(string argument, UpdateType updateSource)
     Echo("Creation Crafting & Management "+version+" "+getSpinning());
     Echo("> "+library.Count+" configured item groups");
     Echo("> "+containers.Count+" monitored inventories");
+    Echo("   Storage Flag: "+storageFlag);
     Echo("> "+assemblers.Count+" managed assemblers");
+    Echo("   Crafter Flag: "+craftFlag);
     
     // Update display screens
     foreach(string set in screenMap.Keys)
@@ -394,7 +395,7 @@ public void collectContainers()
         if(box.CubeGrid == Me.CubeGrid)
         {
             string type = box.BlockDefinition.SubtypeName;
-            if(box.CustomData.ToLower() == storageFlag)
+            if(isBlockFlagged(box, storageFlag))
             {
                 if(type.Contains("Container"))
                     renameContainer(box, prefix, ++boxes);
@@ -436,7 +437,7 @@ public void collectCrafters()
     GridTerminalSystem.GetBlocksOfType<IMyAssembler>(crafters);
     int boxes = 0;
     foreach(var ass in crafters)
-        if(ass.CubeGrid == Me.CubeGrid && ass.CustomData.ToLower() == craftFlag)
+        if(ass.CubeGrid == Me.CubeGrid && isBlockFlagged(ass, craftFlag))
         {
             string type = "Assembler";
             string subtype = ass.BlockDefinition.SubtypeName;
@@ -544,4 +545,14 @@ public static CraftStyle stringToStyle(string nameIn)
         if(nameIn.ToLower() == Enum.GetName(typeof(CraftStyle), style).ToLower())
             return style;
     return CraftStyle.STACKED;
+}
+
+// Returns true if any line of the given block's CustomData matches the given flag string
+public static bool isBlockFlagged(IMyTerminalBlock block, string flagIn)
+{
+    string[] flags = block.CustomData.Split('\n');
+    foreach(string f in flags)
+        if(f.ToLower() == flagIn.ToLower())
+            return true;
+    return false;
 }
