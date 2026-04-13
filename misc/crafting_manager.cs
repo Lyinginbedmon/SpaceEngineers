@@ -35,16 +35,17 @@
 // * stop - Immediately halts the program, recompile to restart it
 // * stop_crafting - Disables autocrafting
 
-const String version = "3.0";
+const String version = "3.8";
 const int INT_MAX = 2147483647;
 const String spinning = "-\\|/";
 const String config_default = 
-    "[general]\nPrefix=CRT\nCraftRate=0\nStorageFlag=main_hold\nCrafterFlag=auto_assembler\nDisplayUnmanaged=1\n\n[Components A]\ncomponent:SteelPlate=100000\ncomponent:InteriorPlate=100000\ncomponent:Construction=50000\ncomponent:SmallTube=10000\ncomponent:LargeTube=10000\ncomponent:Girder=10000\n\n[Components B]\ncomponent:MetalGrid=1000\ncomponent:SolarCell=1000\ncomponent:Display=1000\ncomponent:PowerCell=1000\ncomponent:Motor=1000\ncomponent:Computer=1000\n\n[Prototech Components]\ncomponent:PrototechCapacitor=100\ncomponent:PrototechCircuitry=100\ncomponent:PrototechCoolingUnit=100\ncomponent:PrototechFrame=20\ncomponent:PrototechMachinery=100\ncomponent:PrototechPanel=200\ncomponent:PrototechPropulsionUnit=100\ncomponent:PrototechScrap=0";
+    "[general]\nPrefix=CRT\nCraftRate=0\nCraftStyle=stacked\nStorageFlag=main_hold\nCrafterFlag=auto_assembler\nDisplayUnmanaged=1\n\n[Components A]\ncomponent:SteelPlate=100000\ncomponent:InteriorPlate=100000\ncomponent:Construction=50000\ncomponent:SmallTube=10000\ncomponent:LargeTube=10000\ncomponent:Girder=10000\n\n[Components B]\ncomponent:MetalGrid=1000\ncomponent:SolarCell=1000\ncomponent:Display=1000\ncomponent:PowerCell=1000\ncomponent:Motor=1000\ncomponent:Computer=1000\n\n[Prototech Components]\ncomponent:PrototechCapacitor=100\ncomponent:PrototechCircuitry=100\ncomponent:PrototechCoolingUnit=100\ncomponent:PrototechFrame=20\ncomponent:PrototechMachinery=100\ncomponent:PrototechPanel=200\ncomponent:PrototechPropulsionUnit=100\ncomponent:PrototechScrap=0";
 
 String prefix;
 String storageFlag;
 String craftFlag;
 int craftingRate;
+CraftStyle craftingStyle;
 bool showUnmanaged;
 // All LCD panels
 Dictionary<string, List<IMyTextPanel>> screenMap = new Dictionary<string, List<IMyTextPanel>>();
@@ -52,6 +53,14 @@ Dictionary<string, List<IMyTextPanel>> screenMap = new Dictionary<string, List<I
 List<IMyTerminalBlock> containers = new List<IMyTerminalBlock>();
 // All assemblers
 List<IMyAssembler> assemblers = new List<IMyAssembler>();
+
+// Definitions for different assembler management approaches
+public enum CraftStyle
+{
+    STACKED,
+    BALANCED
+}
+public static CraftStyle[] craftStyles = new CraftStyle[]{CraftStyle.STACKED, CraftStyle.BALANCED};
 
 bool hasClearedScreen = false;
 int ticksRunning = 0;
@@ -62,6 +71,7 @@ private Dictionary<string, Dictionary<MyItemType, int>> library = new Dictionary
 private static Dictionary<MyItemType,int> componentThresholds = new Dictionary<MyItemType, int>();
 // Dictionary of monitored components to how many are needed to meet thresholds
 private static Dictionary<MyItemType,int> componentRequests = new Dictionary<MyItemType, int>();
+private List<string> latestReport = new List<string>();
 
 private static MyIni config = new MyIni();
 
@@ -110,6 +120,7 @@ public void loadConfig(String customData)
     craftingRate = config.Get("general", "CraftRate").ToInt32(10);
     storageFlag = config.Get("general", "StorageFlag").ToString("main_hold").ToLower();
     craftFlag = config.Get("general", "CrafterFlag").ToString("auto_assembler").ToLower();
+    craftingStyle = stringToStyle(config.Get("general", "CraftStyle").ToString("stacked"));
     showUnmanaged = config.Get("general", "ShowUnmanaged").ToBoolean(true);
     
     // Identify all managed item groups
@@ -147,7 +158,7 @@ public void Main(string argument, UpdateType updateSource)
     Echo("Creation Crafting & Management "+version+" "+getSpinning());
     Echo("> "+library.Count+" configured item groups");
     Echo("> "+containers.Count+" monitored inventories");
-    Echo("> "+assemblers.Count+" accessed assemblers");
+    Echo("> "+assemblers.Count+" managed assemblers");
     
     // Update display screens
     foreach(string set in screenMap.Keys)
@@ -160,8 +171,14 @@ public void Main(string argument, UpdateType updateSource)
         Echo("Autocrafting protocol disabled");
     else if(assemblers.Count == 0)
         Echo("No assemblers nominated for autocrafting usage");
-    else if(ticksRunning%craftingRate == 0)
-        updateAutoCrafting();
+    else
+    {
+        Echo("Crafting style: "+Enum.GetName(typeof(CraftStyle), craftingStyle));
+        if(ticksRunning%craftingRate == 0)
+            updateAutoCrafting();
+        foreach(string line in latestReport)
+            Echo(line);
+    }
     
     if(argument.Length > 0)
     {
@@ -215,6 +232,8 @@ public void handleInvScreens(List<IMyTextPanel> screens, Dictionary<MyItemType,i
 
 public void updateAutoCrafting()
 {
+    latestReport.Clear();
+    
     // Dictionary of items that need to be queued up for crafting
     Dictionary<MyItemType,int> craftingQueue = new Dictionary<MyItemType,int>();
 
@@ -235,11 +254,23 @@ public void updateAutoCrafting()
             craftingQueue[product] = componentRequests[product] - tally;
     }
     
-    Echo("Latest autocrafting report:");
+    if(craftingQueue.Count == 0)
+    {
+        latestReport.Add("Inventory nominal, no crafting required");
+        return;
+    }
+    
+    // If any crafting needs to be done, collect all the functioning assemblers
+    List<IMyAssembler> crafters = new List<IMyAssembler>();
+    foreach(IMyAssembler ass in assemblers)
+        if(ass.Enabled && ass.IsFunctional)
+            crafters.Add(ass);
+    
+    latestReport.Add("Latest autocrafting report:");
     foreach(MyItemType item in craftingQueue.Keys)
     {
-        Echo("> "+craftingQueue[item]+"x "+item.SubtypeId);
-        pushRequest(createRequest(item), craftingQueue[item]);
+        latestReport.Add("> "+craftingQueue[item]+"x "+item.SubtypeId);
+        pushRequest(item, craftingQueue[item], crafters);
     }
 }
 
@@ -271,17 +302,32 @@ public int getTotalOfItem(MyItemType item)
     return tally;
 }
 
-// Provides the given item to the nominated assembler with the shortest queue
-public void pushRequest(MyItemType item, decimal count)
+// Provides the given item to the assemblers according to the defined crafting style
+public void pushRequest(MyItemType item, decimal count, List<IMyAssembler> crafters)
 {
+    if(count <= 0)
+        return;
+    
     MyDefinitionId request = createRequest(item);
     
-    // Find least-busy viable assembler
-    IMyAssembler recipient = null;
-    int shortestQueue = INT_MAX;
-    List<IMyAssembler> candidates = new List<IMyAssembler>();
-    foreach(IMyAssembler ass in assemblers)
-        if(ass.IsFunctional && ass.CanUseBlueprint(request))
+    // Find all operational assemblers that can craft the item
+    List<IMyAssembler> set = new List<IMyAssembler>();
+    foreach(IMyAssembler ass in crafters)
+        if(ass.CanUseBlueprint(request))
+            set.Add(ass);
+    if(set.Count == 0)
+    {
+        latestReport.Add("# No viable assembler available for "+item.SubtypeId);
+        return;
+    }
+    
+    // Stacked: Place the full order in the assembler with the shortest queue to reduce power usage
+    if(craftingStyle == CraftStyle.STACKED || count == 1)
+    {
+        IMyAssembler recipient = null;
+        int shortestQueue = INT_MAX;
+        List<IMyAssembler> candidates = new List<IMyAssembler>();
+        foreach(IMyAssembler ass in set)
         {
             int len = 0;
             List<MyProductionItem> queue = new List<MyProductionItem>();
@@ -295,11 +341,25 @@ public void pushRequest(MyItemType item, decimal count)
                 shortestQueue = len;
             }
         }
-    
-    if(recipient == null)
-        Echo("No viable assembler available for "+item.SubtypeId);
-    else
+        
         recipient.AddQueueItem(request, count);
+    }
+    // Balanced: Spread the order across all available assemblers to minimise crafting time
+    else if(craftingStyle == CraftStyle.BALANCED)
+    {
+        int amount = (int)count;
+        int perAss = MathHelper.CeilToInt(amount / set.Count);
+        foreach(IMyAssembler ass in set)
+        {
+            decimal slice = (decimal)MathHelper.Min(perAss, amount);
+            ass.AddQueueItem(request, slice);
+            amount -= (int)slice;
+            if(amount <= 0)
+                break;
+        }
+    }
+    else
+        throw new Exception("Selected crafting style unrecognised! Try BALANCED or STACKED");
 }
 
 // Collects all LCD panels with an item group name as their CustomData
@@ -454,6 +514,7 @@ public static MyDefinitionId createRequest(MyItemType item)
     return MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + name);
 }
 
+// Converts a config item entry into a corresponding item type, if possible
 public static Nullable<MyItemType> stringToItem(string nameIn)
 {
     String[] elements = nameIn.Split(':');
@@ -473,4 +534,13 @@ public static Nullable<MyItemType> stringToItem(string nameIn)
         return MyItemType.MakeAmmo(name);
     
     throw new Exception("Item type unrecognised: "+type+" in "+nameIn);
+}
+
+// Converts the given string to a CraftStyle, or STACKED if none matches
+public static CraftStyle stringToStyle(string nameIn)
+{
+    foreach(CraftStyle style in craftStyles)
+        if(nameIn.ToLower() == Enum.GetName(typeof(CraftStyle), style).ToLower())
+            return style;
+    return CraftStyle.STACKED;
 }
