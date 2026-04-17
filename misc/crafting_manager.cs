@@ -28,6 +28,7 @@
 // For display screens, set their CustomData to any configured item group name (case sensitive)
 // 
 // CONSOLE COMMANDS
+// * clear_queues - Clears the crafting queues of all managed assemblers
 // * reset_config - Reverts the block's CustomData to the default config setup, does NOT reload the config
 // * reload_config - Loads the config from the block's CustomData without recompiling
 // * scan_assemblers - Rescans the local grid for any nominated assemblers
@@ -36,7 +37,7 @@
 // * stop - Immediately halts the program, recompile to restart it
 // * stop_crafting - Disables autocrafting
 
-const String version = "4.0";
+const String version = "4.2";
 const int INT_MAX = 2147483647;
 const String spinning = "-\\|/";
 String config_default = "";
@@ -167,8 +168,6 @@ public void loadConfig(String customData)
         throw new Exception(result.ToString());
     }
     
-    Me.CustomName = prefix+" System Control";
-    
     // Identify system variables
     prefix = config.Get("general", "Prefix").ToString("CRT");
     craftingRate = config.Get("general", "CraftRate").ToInt32(10);
@@ -176,6 +175,8 @@ public void loadConfig(String customData)
     craftFlag = config.Get("general", "CrafterFlag").ToString("auto_assembler").ToLower();
     craftingStyle = stringToStyle(config.Get("general", "CraftStyle").ToString("stacked"));
     showUnmanaged = config.Get("general", "ShowUnmanaged").ToBoolean(true);
+    
+    Me.CustomName = prefix+" System Control";
     
     // Identify all managed item groups
     library.Clear();
@@ -251,6 +252,11 @@ public void Main(string argument, UpdateType updateSource)
             collectCrafters();
         else if(command == "scan_displays")
             collectScreens();
+        else if(command == "clear_queues")
+        {
+            foreach(IMyAssembler ass in assemblers)
+                ass.ClearQueue();
+        }
         else if(command == "stop")
         {
             Runtime.UpdateFrequency = UpdateFrequency.Once;
@@ -372,7 +378,13 @@ public void pushRequest(MyItemType item, decimal count, List<IMyAssembler> craft
     List<IMyAssembler> set = new List<IMyAssembler>();
     foreach(IMyAssembler ass in crafters)
         if(ass.CanUseBlueprint(request))
+        {
+            List<MyProductionItem> queue = new List<MyProductionItem>();
+            ass.GetQueue(queue);
+            if(queue.Count >= 50)
+                continue;
             set.Add(ass);
+        }
     if(set.Count == 0)
     {
         latestReport.Add("# No viable assembler available for "+item.SubtypeId);
@@ -406,7 +418,7 @@ public void pushRequest(MyItemType item, decimal count, List<IMyAssembler> craft
     else if(craftingStyle == CraftStyle.BALANCED)
     {
         int amount = (int)count;
-        int perAss = MathHelper.CeilToInt(amount / set.Count);
+        int perAss = (int)MathHelper.Max(1, MathHelper.CeilToInt(amount / set.Count));
         foreach(IMyAssembler ass in set)
         {
             decimal slice = (decimal)MathHelper.Min(perAss, amount);
