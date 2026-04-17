@@ -37,7 +37,7 @@
 // * stop - Immediately halts the program, recompile to restart it
 // * stop_crafting - Disables autocrafting
 
-const String version = "4.2";
+const String version = "4.3";
 const int INT_MAX = 2147483647;
 const String spinning = "-\\|/";
 String config_default = "";
@@ -621,6 +621,8 @@ public static MyDefinitionId createRequest(MyItemType item)
         name = "ConstructionComponent";
     else if(name == "Motor")
         name = "MotorComponent";
+    else if(name == "Thrust")
+        name = "ThrustComponent";
     return MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + name);
 }
 
