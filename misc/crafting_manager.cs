@@ -37,7 +37,7 @@
 // * stop - Immediately halts the program, recompile to restart it
 // * stop_crafting - Disables autocrafting
 
-const String version = "4.3";
+const String version = "4.5";
 const int INT_MAX = 2147483647;
 const String spinning = "-\\|/";
 String config_default = "";
@@ -83,6 +83,8 @@ private static Dictionary<MyItemType,int> componentThresholds = new Dictionary<M
 // Dictionary of monitored components to how many are needed to meet thresholds
 private static Dictionary<MyItemType,int> componentRequests = new Dictionary<MyItemType, int>();
 private List<string> latestReport = new List<string>();
+// Dictionary of item names to their corresponding recipe names
+private static Dictionary<String,String> recipeIndex = new Dictionary<String,String>();
 
 private static MyIni config = new MyIni();
 
@@ -90,6 +92,9 @@ public Program()
 {
     Runtime.UpdateFrequency = UpdateFrequency.Update10;
     createDefaultConfig();
+    
+    // Populate recipe dictionary
+    initialiseRecipeLibrary();
     
     start();
 }
@@ -123,12 +128,12 @@ private void createDefaultConfig()
     defConfig.Set("general", "DisplayUnmanaged", true);
     
     defConfig.AddSection("Components A");
-    defConfig.Set("Components A", "component:SteelPlate", 100000);
-    defConfig.Set("Components A", "component:InteriorPlate", 100000);
-    defConfig.Set("Components A", "component:Construction", 50000); 
-    defConfig.Set("Components A", "component:SmallTube", 10000); 
-    defConfig.Set("Components A", "component:LargeTube", 10000); 
-    defConfig.Set("Components A", "component:Girder", 10000); 
+    defConfig.Set("Components A", "component:SteelPlate", 10000);
+    defConfig.Set("Components A", "component:InteriorPlate", 10000);
+    defConfig.Set("Components A", "component:Construction", 5000); 
+    defConfig.Set("Components A", "component:SmallTube", 1000); 
+    defConfig.Set("Components A", "component:LargeTube", 1000); 
+    defConfig.Set("Components A", "component:Girder", 1000); 
     
     defConfig.AddSection("Components B");
     defConfig.Set("Components B", "component:MetalGrid", 1000);
@@ -149,6 +154,73 @@ private void createDefaultConfig()
     defConfig.Set("Prototech Components", "component:PrototechScrap", 0);
     
     config_default = defConfig.ToString();
+}
+
+// Initialises the recipe library for retrieving item recipes
+private void initialiseRecipeLibrary()
+{
+    recipeIndex.Clear();
+    // The following is not a complete list of all item names to recipe names
+    // This only covers vanilla items whose item names are different to their corresponding recipe names
+    
+    // Components
+    recipeIndex.Add("Canvas", "Position0030_Canvas");
+    recipeIndex.Add("Computer", "ComputerComponent");
+    recipeIndex.Add("Construction", "ConstructionComponent");
+    recipeIndex.Add("Detector", "DetectorComponent");
+    recipeIndex.Add("Explosives", "ExplosivesComponent");
+    recipeIndex.Add("Girder", "GirderComponent");
+    recipeIndex.Add("GravityGenerator", "GravityGeneratorComponent");
+    recipeIndex.Add("Medical", "MedicalComponent");
+    recipeIndex.Add("Motor", "MotorComponent");
+    recipeIndex.Add("RadioCommunication", "RadioCommunicationEquipment");
+    recipeIndex.Add("Reactor", "ReactorComponent");
+    recipeIndex.Add("Thrust", "ThrustComponent");
+    
+    // Equipment
+    recipeIndex.Add("AngleGrinder4Item", "Position0040_AngleGrinder4");
+    recipeIndex.Add("HandDrill4Item", "Position0080_HandDrill4");
+    recipeIndex.Add("Welder4Item", "Position0120_Welder4");
+    recipeIndex.Add("AngleGrinder2Item", "Position0020_AngleGrinder2");
+    recipeIndex.Add("HandDrill2Item", "Position0060_HandDrill2");
+    recipeIndex.Add("Welder2Item", "Position0100_Welder2");
+    recipeIndex.Add("AngleGrinderItem", "Position0010_AngleGrinder");
+    recipeIndex.Add("HandDrillItem", "Position0050_HandDrill");
+    recipeIndex.Add("HydrogenBottle", "Position0020_HydrogenBottle");
+    recipeIndex.Add("OxygenBottle", "Position0010_OxygenBottle");
+    recipeIndex.Add("AngleGrinder3Item", "Position0030_AngleGrinder3");
+    recipeIndex.Add("HandDrill3Item", "Position0070_HandDrill3");
+    recipeIndex.Add("Welder3Item", "Position0110_Welder3");
+    recipeIndex.Add("WelderItem", "Position0090_Welder");
+    
+    // Weapons
+    recipeIndex.Add("FlareGunItem", "Position0005_FlareGun");
+    recipeIndex.Add("AutomaticRifleItem", "Position0040_AutomaticRifle");
+    recipeIndex.Add("UltimateAutomaticRifleItem", "Position0070_UltimateAutomaticRifle");
+    recipeIndex.Add("RapidFireAutomaticRifleItem", "Position0050_RapidFireAutomaticRifle");
+    recipeIndex.Add("PreciseAutomaticRifleItem", "Position0060_PreciseAutomaticRifle");
+    recipeIndex.Add("AdvancedHandHeldLauncherItem", "Position0090_AdvancedHandHeldLauncher");
+    recipeIndex.Add("BasicHandHeldLauncherItem", "Position0080_BasicHandHeldLauncher");
+    recipeIndex.Add("SemiAutoPistolItem", "Position0010_SemiAutoPistol");
+    recipeIndex.Add("ElitePistolItem", "Position0030_EliteAutoPistol");
+    recipeIndex.Add("FullAutoPistolItem", "Position0020_FullAutoPistol");
+    
+    // Ammunition
+    recipeIndex.Add("LargeCalibreAmmo", "Position0120_LargeCalibreAmmo");
+    recipeIndex.Add("MediumCalibreAmmo", "Position0110_MediumCalibreAmmo");
+    recipeIndex.Add("AutocannonClip", "Position0090_AutocannonClip");
+    recipeIndex.Add("FlareClip", "Position0005_FlareGunMagazine");
+    recipeIndex.Add("NATO_25x184mm", "Position0080_NATO_25x184mmMagazine");
+    recipeIndex.Add("LargeRailgunAmmo", "Position0140_LargeRailgunAmmo");
+    recipeIndex.Add("AutomaticRifleGun_Mag_20rd", "Position0040_AutomaticRifleGun_Mag_20rd");
+    recipeIndex.Add("UltimateAutomaticRifleGun_Mag_30rd", "Position0040_AutomaticRifleGun_Mag_20rd");
+    recipeIndex.Add("RapidFireAutomaticRifleGun_Mag_50rd", "Position0050_RapidFireAutomaticRifleGun_Mag_50rd");
+    recipeIndex.Add("PreciseAutomaticRifleGun_Mag_5rd", "Position0060_PreciseAutomaticRifleGun_Mag_5rd");
+    recipeIndex.Add("Missile200mm", "Position0100_Missile200mm");
+    recipeIndex.Add("SemiAutoPistolMagazine", "Position0010_SemiAutoPistolMagazine");
+    recipeIndex.Add("ElitePistolMagazine", "Position0030_ElitePistolMagazine");
+    recipeIndex.Add("FullAutoPistolMagazine", "Position0020_FullAutoPistolMagazine");
+    recipeIndex.Add("SmallRailgunAmmo", "Position0130_SmallRailgunAmmo");
 }
 
 public void loadConfig(String customData)
@@ -611,18 +683,8 @@ public static bool isRequestOfItem(MyProductionItem request, MyItemType item)
 public static MyDefinitionId createRequest(MyItemType item)
 {
     string name = item.SubtypeId;
-    if(name == "Explosives")
-        name = "ExplosiveComponent";
-    else if(name == "Girder")
-        name = "GirderComponent";
-    else if(name == "Computer")
-        name = "ComputerComponent";
-    else if(name == "Construction")
-        name = "ConstructionComponent";
-    else if(name == "Motor")
-        name = "MotorComponent";
-    else if(name == "Thrust")
-        name = "ThrustComponent";
+    if(recipeIndex.ContainsKey(name))
+        name = recipeIndex[name];
     return MyDefinitionId.Parse("MyObjectBuilder_BlueprintDefinition/" + name);
 }
 
