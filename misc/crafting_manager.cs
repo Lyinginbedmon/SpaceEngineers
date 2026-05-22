@@ -37,7 +37,7 @@
 // * stop - Immediately halts the program, recompile to restart it
 // * stop_crafting - Disables autocrafting
 
-const String version = "4.5";
+const String version = "4.6";
 const int INT_MAX = 2147483647;
 const String spinning = "-\\|/";
 String config_default = "";
@@ -60,10 +60,11 @@ public enum ContainerType
 {
     SMALL,
     MEDIUM,
+    BULK,
     MODULAR,
     LARGE
 }
-public static ContainerType[] containerTypes = new ContainerType[]{ContainerType.SMALL, ContainerType.MEDIUM, ContainerType.MODULAR, ContainerType.LARGE};
+public static ContainerType[] containerTypes = new ContainerType[]{ContainerType.SMALL, ContainerType.MEDIUM, ContainerType.BULK, ContainerType.MODULAR, ContainerType.LARGE};
 
 // Definitions for different assembler management approaches
 public enum CraftStyle
@@ -619,6 +620,8 @@ public static ContainerType containerToType(IMyCargoContainer box)
     string type = box.BlockDefinition.SubtypeName;
     if(type.Contains("Medium"))
         return ContainerType.MEDIUM;
+    else if(type.Contains("Bulk"))
+        return ContainerType.BULK;
     else if(type.Contains("Modular"))
         return ContainerType.MODULAR;
     else if(type.Replace("LargeBlock","").Contains("Large"))
