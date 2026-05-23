@@ -17,11 +17,13 @@
 // CONSOLE COMMANDS
 // * reset_config - Reverts the block's CustomData to the default config setup, does NOT reload the config
 // * reload_config - Loads the config from the block's CustomData without recompiling
-// * scan_storage - Rescans the local grid for any storage inventories of note
-// * scan_input - Rescans the local grid for any input inventories of note
+// * scan_boxes - Rescans the local grid for inventories to monitor
+// * pause - Pauses all sorting operations
+// * start - Resumes sorting operations after pause has been called
+// * collate - Applies the sorting system to the storage containers
 // * stop - Immediately halts the program, recompile to restart it
 
-const String version = "1.0";
+const String version = "1.4";
 const String spinning = "-\\|/";
 String config_default = "";
 
@@ -37,6 +39,7 @@ List<IMyTerminalBlock> itemInputs = new List<IMyTerminalBlock>();
 List<IMyProductionBlock> itemProducers = new List<IMyProductionBlock>();
 
 int ticksRunning = 0;
+bool sortingEnabled = true;
 
 private static MyIni config = new MyIni();
 
@@ -107,10 +110,12 @@ public void Main(string argument, UpdateType updateSource)
     Echo("  - "+tally+" total items waiting for sorting");
     
     Echo(" * "+itemStorage.Count+" storage containers");
+    if(!sortingEnabled)
+        Echo("Sorting currently paused");
     
-    if(tally > 0)
+    if(sortingEnabled && tally > 0)
     {
-        evaluateInputs(itemInputs, itemProducers);
+        evaluateInputs();
         Runtime.UpdateFrequency = UpdateFrequency.Update10;
     }
     else
@@ -123,10 +128,14 @@ public void Main(string argument, UpdateType updateSource)
             Me.CustomData = config_default;
         else if(command == "reload_config")
             start();
-        else if(command == "scan_storage")
-            collectContainers();
+        else if(command == "scan_boxes")
+            collectInventories();
         else if(command == "scan_input")
             collectInputs();
+        else if(command == "pause" || command == "start")
+            sortingEnabled = command == "start";
+        else if(command == "collate")
+            collateStorage();
         else if(command == "stop")
         {
             Runtime.UpdateFrequency = UpdateFrequency.Once;
@@ -137,24 +146,63 @@ public void Main(string argument, UpdateType updateSource)
 
 // #### MANAGEMENT FUNCTIONS ####
 
-public void evaluateInputs(List<IMyTerminalBlock> inputs, List<IMyProductionBlock> producers)
+public void collateStorage()
 {
-    foreach(var input in inputs)
+    Echo("Collating storage...");
+    foreach(var input in itemStorage)
+    {
+        IMyInventory inv = input.GetInventory();
+        if(inv.ItemCount == 0)
+            continue;
+        
+        int index = inv.ItemCount - 1;
+        while(index >= 0)
+        {
+            MyInventoryItem contents = inv.GetItemAt(index--).Value;
+            if(contents == null || contents.Amount <= 0)
+                continue;
+            
+            // Find best box for this item
+            IMyInventory best = inv;
+            foreach(IMyTerminalBlock box in itemStorage)
+            {
+                IMyInventory boxInv = box.GetInventory();
+                if(!boxInv.IsFull && inv.IsConnectedTo(boxInv) && isBetterChoice(inv, boxInv, contents.Type))
+                    best = boxInv;
+            }
+            
+            if(best != inv)
+            {
+                inv.TransferItemTo(best, contents, contents.Amount);
+                Echo(" - Collated "+contents.Type.SubtypeId+" x"+contents.Amount);
+            }
+        }
+    }
+}
+
+public void evaluateInputs()
+{
+    Echo("Performing sorting operations...");
+    foreach(var input in itemInputs)
         if(processInput(input.GetInventory()))
             return;
     
-    foreach(var producer in producers)
+    foreach(var producer in itemProducers)
         if(processInput(producer.OutputInventory))
             return;
 }
 
+// Tries to store the contents of the inventory in storage
 public bool processInput(IMyInventory inv)
 {
-    // Identify items present in input
-    int index = 0;
-    while(index < inv.ItemCount)
+    if(inv.ItemCount == 0)
+        return false;
+    
+    // Identify items present in inventory
+    int index = inv.ItemCount - 1;
+    while(index >= 0)
     {
-        MyInventoryItem contents = inv.GetItemAt(index++).Value;
+        MyInventoryItem contents = inv.GetItemAt(index--).Value;
         if(contents.Amount <= 0)
             continue;
         
@@ -165,38 +213,59 @@ public bool processInput(IMyInventory inv)
     return false;
 }
 
+// Attempts to move the item into the most-appropriate storage inventory
 public bool tryStore(MyInventoryItem item, IMyInventory inv)
 {
+    MyItemType type = item.Type;
+    Echo(" - Sorting "+type.SubtypeId+" x"+item.Amount);
+    bool result = false;
+    
     List<IMyTerminalBlock> boxes = new List<IMyTerminalBlock>();
     ListExtensions.AddList(boxes, itemStorage);
-    bool result = false;
-    MyItemType type = item.Type;
-    while(boxes.Count > 0 && item.Amount > 0)
+    int amount;
+    while(boxes.Count > 0 && (amount = inv.GetItemAmount(type).ToIntSafe()) > 0)
     {
-        // Find box with highest existing volume of item
+        // Find box with highest existing volume of item or lowest overall usage if no box contains it
         IMyTerminalBlock box = null;
-        int boxTotal = -1;
+        IMyInventory boxInv = null;
         foreach(IMyTerminalBlock b in boxes)
-            if(b.GetInventory().IsFull || !inv.IsConnectedTo(b.GetInventory()))
+        {
+            IMyInventory bInv = b.GetInventory();
+            if
+            (
+                bInv.IsFull ||
+                !inv.IsConnectedTo(bInv)
+            )
                 continue;
-            else if(box == null || b.GetInventory().GetItemAmount(type).ToIntSafe() > boxTotal)
+            else if
+            (
+                box == null || 
+                isBetterChoice(boxInv, bInv, type)
+            )
             {
                 box = b;
-                boxTotal = box.GetInventory().GetItemAmount(type).ToIntSafe();
+                boxInv = box.GetInventory();
             }
-        
+        }
         // Remove box from list and attempt to transfer to it
         boxes.Remove(box);
-        result = inv.TransferItemTo(box.GetInventory(), item, item.Amount) || result;
+        result = inv.TransferItemTo(boxInv, item, amount) || result;
     }
+    
+    if(!result)
+        Echo(" ! Failed to move "+type.SubtypeId+" from "+inv.Owner.DisplayName);
     return result;
 }
 
-public static int compare(IMyTerminalBlock a, IMyTerminalBlock b, MyItemType item)
+// Returns true if box B has more of the given item than box A, or if equal and B has less volume in-use
+public static bool isBetterChoice(IMyInventory a, IMyInventory b, MyItemType item)
 {
-    int x = a.GetInventory().GetItemAmount(item).ToIntSafe();
-    int y = b.GetInventory().GetItemAmount(item).ToIntSafe();
-    return x < y ? -1 : x > y ? 1 : 0;
+    int x = a.GetItemAmount(item).ToIntSafe();
+    int y = b.GetItemAmount(item).ToIntSafe();
+    
+    // If both amounts are equal, favour the box with the lowest in-use volume
+    // This encourages usage of empty containers over mixed ones
+    return x == y ? b.ItemCount < a.ItemCount : x < y;
 }
 
 // #### UTILITY FUNCTIONS ####
