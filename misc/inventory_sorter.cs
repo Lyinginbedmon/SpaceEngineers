@@ -42,7 +42,7 @@ private static MyIni config = new MyIni();
 
 public Program()
 {
-    Runtime.UpdateFrequency = UpdateFrequency.Update10;
+    Runtime.UpdateFrequency = UpdateFrequency.Update100;
     createDefaultConfig();
     start();
 }
@@ -52,11 +52,8 @@ public void start()
     // Define component thresholds
     loadConfig(Me.CustomData);
     
-    // Identify storage inventories
-    collectContainers();
-    
-    // Identify input inventories
-    collectInputs();
+    // Identify input and storage inventories
+    collectInventories();
 }
 
 private void createDefaultConfig()
@@ -112,7 +109,12 @@ public void Main(string argument, UpdateType updateSource)
     Echo(" * "+itemStorage.Count+" storage containers");
     
     if(tally > 0)
+    {
         evaluateInputs(itemInputs, itemProducers);
+        Runtime.UpdateFrequency = UpdateFrequency.Update10;
+    }
+    else
+        Runtime.UpdateFrequency = UpdateFrequency.Update100;
     
     if(argument.Length > 0)
     {
@@ -138,13 +140,15 @@ public void Main(string argument, UpdateType updateSource)
 public void evaluateInputs(List<IMyTerminalBlock> inputs, List<IMyProductionBlock> producers)
 {
     foreach(var input in inputs)
-        processInput(input.GetInventory());
+        if(processInput(input.GetInventory()))
+            return;
     
     foreach(var producer in producers)
-        processInput(producer.OutputInventory);
+        if(processInput(producer.OutputInventory))
+            return;
 }
 
-public void processInput(IMyInventory inv)
+public bool processInput(IMyInventory inv)
 {
     // Identify items present in input
     int index = 0;
@@ -155,35 +159,43 @@ public void processInput(IMyInventory inv)
             continue;
         
         // Try to sort item into storage inventories
-        tryStore(contents, inv);
+        if(tryStore(contents, inv))
+            return true;
     }
+    return false;
 }
 
-public void tryStore(MyInventoryItem item, IMyInventory inv)
+public bool tryStore(MyInventoryItem item, IMyInventory inv)
 {
     List<IMyTerminalBlock> boxes = new List<IMyTerminalBlock>();
     ListExtensions.AddList(boxes, itemStorage);
-    
+    bool result = false;
+    MyItemType type = item.Type;
     while(boxes.Count > 0 && item.Amount > 0)
     {
         // Find box with highest existing volume of item
         IMyTerminalBlock box = null;
+        int boxTotal = -1;
         foreach(IMyTerminalBlock b in boxes)
-            if(box == null)
+            if(b.GetInventory().IsFull || !inv.IsConnectedTo(b.GetInventory()))
+                continue;
+            else if(box == null || b.GetInventory().GetItemAmount(type).ToIntSafe() > boxTotal)
+            {
                 box = b;
-            else if(compare(box, b, item.Type) < 0)
-                box = b;
+                boxTotal = box.GetInventory().GetItemAmount(type).ToIntSafe();
+            }
         
         // Remove box from list and attempt to transfer to it
         boxes.Remove(box);
-        inv.TransferItemTo(box.GetInventory(), item, item.Amount);
+        result = inv.TransferItemTo(box.GetInventory(), item, item.Amount) || result;
     }
+    return result;
 }
 
 public static int compare(IMyTerminalBlock a, IMyTerminalBlock b, MyItemType item)
 {
-    int x = getItemAmount(a.GetInventory(), item);
-    int y = getItemAmount(b.GetInventory(), item);
+    int x = a.GetInventory().GetItemAmount(item).ToIntSafe();
+    int y = b.GetInventory().GetItemAmount(item).ToIntSafe();
     return x < y ? -1 : x > y ? 1 : 0;
 }
 
@@ -193,6 +205,38 @@ public static int compare(IMyTerminalBlock a, IMyTerminalBlock b, MyItemType ite
 public char getSpinning()
 {
     return spinning[this.ticksRunning % spinning.Length];
+}
+
+public void collectInventories()
+{
+    itemInputs.Clear();
+    itemStorage.Clear();
+    List<IMyCargoContainer> cargo = new List<IMyCargoContainer>();
+    GridTerminalSystem.GetBlocksOfType<IMyCargoContainer>(cargo);
+    foreach(var box in cargo)
+        if(box.CubeGrid == Me.CubeGrid)
+        {
+            string type = box.BlockDefinition.SubtypeName;
+            if(isBlockFlagged(box, storageFlag))
+                itemStorage.Add(box);
+            else if(isBlockFlagged(box, inputFlag) || type.Contains("CargoTerminal"))
+                itemInputs.Add(box);
+        }
+    
+    // Add all grid-connected connectors to the monitoring list as writ
+    List<IMyShipConnector> connectors = new List<IMyShipConnector>();
+    GridTerminalSystem.GetBlocksOfType<IMyShipConnector>(connectors);
+    foreach(var box in connectors)
+        if(box.CubeGrid == Me.CubeGrid)
+            itemInputs.Add(box);
+    
+    // Add all nominated production blocks (assemblers, refineries, etc.)
+    itemProducers.Clear();
+    List<IMyProductionBlock> producers = new List<IMyProductionBlock>();
+    GridTerminalSystem.GetBlocksOfType<IMyProductionBlock>(producers);
+    foreach(var box in producers)
+        if(box.CubeGrid == Me.CubeGrid && isBlockFlagged(box, inputFlag))
+            itemProducers.Add(box);
 }
 
 // Collects all nominated cargo containers, as well as all cargo terminals and connectors, on this grid
@@ -213,6 +257,7 @@ public void collectContainers()
 public void collectInputs()
 {
     itemInputs.Clear();
+    itemProducers.Clear();
     List<IMyCargoContainer> cargo = new List<IMyCargoContainer>();
     GridTerminalSystem.GetBlocksOfType<IMyCargoContainer>(cargo);
     foreach(var box in cargo)
@@ -260,7 +305,7 @@ public static int getTotalItems(IMyInventory inv)
     int tally = 0;
     int index = 0;
     while(index < inv.ItemCount)
-        tally += inv.GetItemAt(index).Value.Amount.ToIntSafe();
+        tally += inv.GetItemAt(index++).Value.Amount.ToIntSafe();
     return tally;
 }
 
