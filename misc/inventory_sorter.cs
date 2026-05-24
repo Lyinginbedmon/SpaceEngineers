@@ -167,7 +167,7 @@ public void collateStorage()
             foreach(IMyTerminalBlock box in itemStorage)
             {
                 IMyInventory boxInv = box.GetInventory();
-                if(!boxInv.IsFull && inv.IsConnectedTo(boxInv) && isBetterChoice(inv, boxInv, contents.Type))
+                if(!boxInv.IsFull && inv.IsConnectedTo(boxInv) && isBetterChoice(best, boxInv, contents.Type))
                     best = boxInv;
             }
             
